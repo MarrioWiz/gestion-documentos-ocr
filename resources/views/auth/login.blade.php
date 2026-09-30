@@ -69,6 +69,27 @@
                 </form>
             </div>
 
+            @if (app()->environment('local', 'testing'))
+                {{-- Solo en modo local/pruebas: en producción esto no se muestra. --}}
+                <div class="card-soft p-3 mt-3 small" style="border-color: rgba(251, 191, 36, .45);">
+                    <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                        <span class="fw-semibold text-warning"><i class="bi bi-person-badge"></i> Cuenta de prueba</span>
+                        <span class="badge badge-aviso">solo para pruebas</span>
+                    </div>
+                    <div class="text-muted">Correo: <span class="font-monospace text-reset">{{ config('app.cuenta_demo.email') }}</span></div>
+                    <div class="text-muted mb-2">Contraseña: <span class="font-monospace text-reset">{{ config('app.cuenta_demo.password') }}</span></div>
+                    <button type="button" id="usar-demo" class="btn btn-ghost btn-sm w-100">
+                        <i class="bi bi-magic"></i> Llenar con la cuenta de prueba
+                    </button>
+                </div>
+                <script>
+                    document.getElementById('usar-demo').addEventListener('click', function () {
+                        document.getElementById('email').value = @json(config('app.cuenta_demo.email'));
+                        document.getElementById('password').value = @json(config('app.cuenta_demo.password'));
+                    });
+                </script>
+            @endif
+
             <p class="text-center text-muted small mt-4 mb-0">
                 <i class="bi bi-lock"></i> Acceso solo con cuenta autorizada. Los archivos nunca son públicos.
             </p>

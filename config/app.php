@@ -80,6 +80,16 @@ return [
 
     'locale' => env('APP_LOCALE', 'en'),
 
+    /*
+    | Cuenta de prueba que crea DatabaseSeeder. En entorno local se muestra en
+    | la pantalla de inicio de sesión para que quien revise el proyecto pueda
+    | entrar sin buscarla; en producción nunca se muestra.
+    */
+    'cuenta_demo' => [
+        'email' => env('ADMIN_EMAIL', 'admin@gestion.test'),
+        'password' => env('ADMIN_PASSWORD', 'Admin12345'),
+    ],
+
     'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
 
     'faker_locale' => env('APP_FAKER_LOCALE', 'en_US'),

@@ -12,6 +12,6 @@ class ExampleTest extends TestCase
     public function test_la_raiz_redirige_al_login(): void
     {
         $this->get('/')->assertRedirect('/login');
-        $this->get('/login')->assertOk()->assertSee('DocuVault');
+        $this->get('/login')->assertOk()->assertSee('DocuVault')->assertSee('Cuenta de prueba')->assertSee('admin@gestion.test');
     }
 }

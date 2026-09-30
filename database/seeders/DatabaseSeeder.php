@@ -14,10 +14,10 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $admin = User::updateOrCreate(
-            ['email' => env('ADMIN_EMAIL', 'admin@gestion.test')],
+            ['email' => config('app.cuenta_demo.email')],
             [
                 'name' => env('ADMIN_NAME', 'Administrador'),
-                'password' => env('ADMIN_PASSWORD', 'Admin12345'),
+                'password' => config('app.cuenta_demo.password'),
             ],
         );
 
