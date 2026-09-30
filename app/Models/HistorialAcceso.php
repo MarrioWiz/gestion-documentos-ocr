@@ -10,6 +10,7 @@ class HistorialAcceso extends Model
     protected $table = 'historial_accesos';
 
     const CREATED_AT = 'fecha';
+
     const UPDATED_AT = null;
 
     public const ACCIONES = [

@@ -14,7 +14,7 @@
 <body>
     <div class="fondo-malla" aria-hidden="true"></div>
 
-    <nav class="navbar navbar-expand-lg navbar-gestion sticky-top mb-4">
+    <nav class="navbar navbar-expand-xl navbar-gestion sticky-top mb-4">
         <div class="container">
             <a class="navbar-brand d-flex align-items-center gap-2" href="{{ route('dashboard') }}">
                 <span class="logo-orb"><i class="bi bi-shield-lock-fill"></i></span>
@@ -24,7 +24,7 @@
                 <i class="bi bi-list fs-3"></i>
             </button>
             <div class="collapse navbar-collapse" id="menu-principal">
-                <ul class="navbar-nav me-auto ms-lg-4 gap-lg-1">
+                <ul class="navbar-nav me-auto ms-xl-4 gap-xl-1">
                     <li class="nav-item">
                         <a class="nav-link @if(request()->routeIs('dashboard')) active @endif" href="{{ route('dashboard') }}"><i class="bi bi-grid-1x2"></i> Panel</a>
                     </li>
@@ -40,7 +40,7 @@
                         </li>
                     @endif
                 </ul>
-                <div class="d-flex flex-wrap align-items-center gap-2 py-2 py-lg-0">
+                <div class="d-flex flex-wrap align-items-center gap-2 py-2 py-xl-0">
                     <a class="btn btn-ghost btn-sm" href="{{ route('documentos.carga-masiva') }}">
                         <i class="bi bi-collection"></i> Carga masiva
                     </a>

@@ -10,6 +10,7 @@ use App\Services\DocumentoOcrService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
 /**
@@ -54,7 +55,7 @@ class CargaMasivaTest extends TestCase
         ], $cambios);
     }
 
-    private function subir(string $nombre, array $lectura): \Illuminate\Testing\TestResponse
+    private function subir(string $nombre, array $lectura): TestResponse
     {
         $this->lecturas[] = $lectura;
 

@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class Documento extends Model
 {
     const CREATED_AT = 'fecha_carga';
+
     const UPDATED_AT = null;
 
     // Los archivos se guardan en el disco privado (storage/app/private) y

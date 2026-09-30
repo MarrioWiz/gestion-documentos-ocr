@@ -66,7 +66,17 @@
         border-bottom: 1px solid var(--color-border);
     }
     .navbar-gestion .navbar-brand { font-weight: 700; letter-spacing: .3px; color: #fff; }
-    .navbar-gestion .nav-link { color: var(--color-ink-soft); border-radius: 10px; padding: .45rem .8rem !important; }
+    .navbar-gestion .nav-link {
+        color: var(--color-ink-soft); border-radius: 10px; padding: .45rem .8rem !important;
+        display: flex; align-items: center; gap: .45rem; white-space: nowrap;
+    }
+    .navbar-gestion .btn { white-space: nowrap; }
+    @media (min-width: 1200px) {
+        .navbar-gestion .navbar-collapse > .d-flex { flex-wrap: nowrap !important; }
+    }
+    .text-success { color: var(--color-success) !important; }
+    .text-danger { color: var(--color-danger) !important; }
+    .text-warning { color: var(--color-warning) !important; }
     .navbar-gestion .nav-link:hover { color: #fff; background: rgba(148, 163, 184, .08); }
     .navbar-gestion .nav-link.active { color: var(--color-accent); background: rgba(34, 211, 238, .1); }
 
@@ -200,7 +210,7 @@
     .grafica-barras { display: flex; flex-direction: column; gap: .7rem; }
     .grafica-barras .fila { display: grid; grid-template-columns: 150px 1fr 36px; align-items: center; gap: .75rem; font-size: .88rem; }
     .grafica-barras .pista { height: 10px; border-radius: 4px; background: rgba(148, 163, 184, .08); position: relative; }
-    .grafica-barras .barra { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; background: var(--color-accent); min-width: 2px; transition: filter .12s; }
+    .grafica-barras .barra { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; background: var(--color-accent); transition: filter .12s; }
     .grafica-barras .fila:hover .barra { filter: brightness(1.25); box-shadow: 0 0 12px rgba(34, 211, 238, .5); }
     .grafica-barras .valor { text-align: right; color: var(--color-ink); font-variant-numeric: tabular-nums; }
 
