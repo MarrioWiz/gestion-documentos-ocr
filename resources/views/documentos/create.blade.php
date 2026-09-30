@@ -3,16 +3,17 @@
 @section('titulo', 'Subir documento')
 
 @section('contenido')
-    <h1 class="h4 page-title mb-4">Subir documento</h1>
+    <div class="eyebrow mb-1">Captura asistida</div>
+    <h1 class="h3 page-title mb-4">Subir documento</h1>
 
     @if (session('confirmar_reemplazo'))
         @php $pendiente = session('confirmar_reemplazo'); @endphp
-        <div class="card-soft border-warning-subtle p-3 mb-4" style="border: 1px solid #fbbf24 !important;">
+        <div class="card-soft p-3 mb-4" style="border-color: rgba(251, 191, 36, .5);">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
                 <div class="d-flex align-items-center gap-2">
                     <i class="bi bi-exclamation-triangle-fill text-warning fs-5"></i>
                     <div>
-                        Ya existe un documento tipo <strong>{{ \App\Models\Persona::META_DOCUMENTO[$pendiente['tipo_documento']]['label'] }}</strong>
+                        Ya existe un documento tipo <strong>{{ \App\Models\Persona::etiquetaTipo($pendiente['tipo_documento']) }}</strong>
                         para esta persona. ¿Reemplazarlo por "{{ $pendiente['nombre_original'] }}"?
                     </div>
                 </div>
@@ -23,7 +24,7 @@
                     </form>
                     <form method="POST" action="{{ route('documentos.cancelar-reemplazo') }}">
                         @csrf
-                        <button class="btn btn-sm btn-outline-secondary" type="submit">Cancelar</button>
+                        <button class="btn btn-sm btn-ghost" type="submit">Cancelar</button>
                     </form>
                 </div>
             </div>
@@ -31,106 +32,22 @@
     @endif
 
     <div class="row g-4">
-        <div class="col-lg-7">
-            <div class="card-soft p-4">
-                <form method="POST" action="{{ route('documentos.store') }}" enctype="multipart/form-data" id="form-documento">
-                    @csrf
-
-                    <div class="mb-3">
-                        <label class="form-label fw-semibold">CURP</label>
-                        <input type="text" name="curp" maxlength="18"
-                               class="form-control text-uppercase @error('curp') is-invalid @enderror"
-                               value="{{ old('curp', $curpPrellenada) }}" required>
-                        @error('curp') <div class="invalid-feedback">{{ $message }}</div> @enderror
-                        <div class="form-text">Se usa para buscar si la persona ya existe.</div>
-                    </div>
-
-                    <div class="mb-3">
-                        <label class="form-label fw-semibold">Nombre completo</label>
-                        <input type="text" name="nombre_completo"
-                               class="form-control @error('nombre_completo') is-invalid @enderror"
-                               value="{{ old('nombre_completo', $nombrePrellenado) }}" required>
-                        @error('nombre_completo') <div class="invalid-feedback">{{ $message }}</div> @enderror
-                    </div>
-
-                    <div class="mb-3">
-                        <label class="form-label fw-semibold">Fecha de nacimiento (opcional)</label>
-                        <input type="date" name="fecha_nacimiento"
-                               class="form-control @error('fecha_nacimiento') is-invalid @enderror"
-                               value="{{ old('fecha_nacimiento') }}">
-                        @error('fecha_nacimiento') <div class="invalid-feedback">{{ $message }}</div> @enderror
-                    </div>
-
-                    <div class="mb-3">
-                        <label class="form-label fw-semibold">Entidad de nacimiento (opcional)</label>
-                        <select name="entidad_nacimiento" class="form-select @error('entidad_nacimiento') is-invalid @enderror">
-                            <option value="">-- Selecciona --</option>
-                            @foreach (\App\Services\DocumentoOcrService::ENTIDADES_CURP as $entidad)
-                                <option value="{{ $entidad }}" @selected(old('entidad_nacimiento') === $entidad)>{{ $entidad }}</option>
-                            @endforeach
-                        </select>
-                        @error('entidad_nacimiento') <div class="invalid-feedback">{{ $message }}</div> @enderror
-                        <div class="form-text">Se deduce de la CURP (posiciones 12-13); revisa que coincida.</div>
-                    </div>
-
-                    <div class="mb-3">
-                        <label class="form-label fw-semibold">Tipo de documento</label>
-                        <select name="tipo_documento" class="form-select @error('tipo_documento') is-invalid @enderror" required>
-                            <option value="">-- Selecciona --</option>
-                            @foreach (\App\Models\Persona::TIPOS_DOCUMENTO as $tipo)
-                                <option value="{{ $tipo }}" @selected(old('tipo_documento') === $tipo)>
-                                    {{ \App\Models\Persona::META_DOCUMENTO[$tipo]['label'] }}
-                                </option>
-                            @endforeach
-                        </select>
-                        @error('tipo_documento') <div class="invalid-feedback">{{ $message }}</div> @enderror
-                    </div>
-
-                    <div class="mb-4">
-                        <label class="form-label fw-semibold">Número de documento (opcional)</label>
-                        <input type="text" name="numero_documento"
-                               class="form-control @error('numero_documento') is-invalid @enderror"
-                               value="{{ old('numero_documento') }}">
-                        @error('numero_documento') <div class="invalid-feedback">{{ $message }}</div> @enderror
-                    </div>
-
-                    <input type="file" id="archivo" name="archivo" accept=".jpg,.jpeg,.png,.pdf" class="d-none">
-                    <input type="hidden" name="texto_extraido" id="texto_extraido">
-
-                    <div class="d-flex justify-content-between align-items-center mt-4">
-                        <button type="button" id="btn-ocr" class="btn btn-outline-secondary btn-sm" disabled>
-                            <i class="bi bi-magic"></i> Extraer datos con OCR
-                        </button>
-                        <button type="submit" class="btn btn-accent">
-                            <i class="bi bi-check-lg"></i> Guardar
-                        </button>
-                    </div>
-                    <div id="ocr-estado" class="text-muted small mt-2"></div>
-                    <details id="ocr-texto-crudo" class="small mt-2" hidden>
-                        <summary class="text-muted">Ver texto que leyó el OCR</summary>
-                        <pre id="ocr-texto-crudo-contenido" class="small bg-light p-2 rounded mt-1" style="white-space: pre-wrap;"></pre>
-                    </details>
-                    @error('archivo') <div class="text-danger small mt-2">{{ $message }}</div> @enderror
-                </form>
-            </div>
-        </div>
-
-        <div class="col-lg-5">
+        <div class="col-lg-5 order-lg-2">
             <div class="card-soft p-4 h-100">
-                <h2 class="h6 mb-3">Archivo</h2>
+                <h2 class="h6 mb-3"><span class="text-gradiente fw-bold">1.</span> Archivo</h2>
 
-                <div id="dropzone" class="dropzone">
+                <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Seleccionar archivo">
                     <div id="dropzone-vacio">
                         <i class="bi bi-cloud-arrow-up d-block mb-2"></i>
                         <p class="mb-1 fw-semibold">Arrastra tu archivo aquí</p>
-                        <p class="text-muted small mb-0">o haz clic para seleccionarlo &middot; JPG, PNG o PDF, máx. 10MB</p>
+                        <p class="text-muted small mb-0">o haz clic para seleccionarlo &middot; JPG, PNG, WEBP o PDF, máx. 10MB</p>
                     </div>
                     <div id="dropzone-preview" class="d-none">
-                        <img id="preview-imagen" class="d-none rounded-3 mb-2" style="max-height: 220px; max-width: 100%;">
-                        <i id="preview-icono-pdf" class="bi bi-file-earmark-pdf-fill d-none" style="font-size: 3rem; color: #dc2626;"></i>
+                        <img id="preview-imagen" class="d-none rounded-3 mb-2" style="max-height: 220px; max-width: 100%;" alt="Vista previa">
+                        <i id="preview-icono-pdf" class="bi bi-file-earmark-pdf-fill d-none" style="font-size: 3rem; color: var(--color-danger);"></i>
                         <p id="preview-nombre" class="fw-semibold mb-0 mt-2 text-break"></p>
                         <p id="preview-peso" class="text-muted small mb-0"></p>
-                        <button type="button" id="btn-quitar" class="btn btn-sm btn-outline-danger mt-2">
+                        <button type="button" id="btn-quitar" class="btn btn-sm btn-ghost mt-2">
                             <i class="bi bi-x-lg"></i> Quitar
                         </button>
                     </div>
@@ -138,6 +55,95 @@
                 <p id="error-archivo" class="text-danger small mt-2 mb-0" hidden>
                     <i class="bi bi-exclamation-circle"></i> Selecciona un archivo antes de guardar.
                 </p>
+
+                <button type="button" id="btn-ocr" class="btn btn-accent w-100 mt-3" disabled>
+                    <i class="bi bi-magic"></i> Extraer datos con OCR
+                </button>
+                <div id="ocr-estado" class="text-muted small mt-2" aria-live="polite"></div>
+                <div id="aviso-persona" class="small mt-3" hidden></div>
+                <details id="ocr-texto-crudo" class="small mt-3" hidden>
+                    <summary class="text-muted">Ver texto que leyó el OCR</summary>
+                    <pre id="ocr-texto-crudo-contenido" class="small p-2 rounded mt-1 texto-ocr" style="white-space: pre-wrap;"></pre>
+                </details>
+            </div>
+        </div>
+
+        <div class="col-lg-7 order-lg-1">
+            <div class="card-soft p-4">
+                <h2 class="h6 mb-3"><span class="text-gradiente fw-bold">2.</span> Revisa los datos</h2>
+                <form method="POST" action="{{ route('documentos.store') }}" enctype="multipart/form-data" id="form-documento">
+                    @csrf
+
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold" for="curp">CURP <span id="curp-verificada" class="badge badge-completo ms-1" hidden><i class="bi bi-patch-check"></i> dígito verificador correcto</span></label>
+                        <input type="text" id="curp" name="curp" maxlength="18"
+                               class="form-control text-uppercase font-monospace @error('curp') is-invalid @enderror"
+                               value="{{ old('curp', $curpPrellenada) }}" required>
+                        @error('curp') <div class="invalid-feedback">{{ $message }}</div> @enderror
+                        <div class="form-text">Se usa para saber si la persona ya existe: si existe, el documento se agrega a su expediente.</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold" for="nombre_completo">Nombre completo</label>
+                        <input type="text" id="nombre_completo" name="nombre_completo"
+                               class="form-control text-uppercase @error('nombre_completo') is-invalid @enderror"
+                               value="{{ old('nombre_completo', $nombrePrellenado) }}" required>
+                        @error('nombre_completo') <div class="invalid-feedback">{{ $message }}</div> @enderror
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-6">
+                            <label class="form-label fw-semibold" for="fecha_nacimiento">Fecha de nacimiento</label>
+                            <input type="date" id="fecha_nacimiento" name="fecha_nacimiento"
+                                   class="form-control @error('fecha_nacimiento') is-invalid @enderror"
+                                   value="{{ old('fecha_nacimiento') }}">
+                            @error('fecha_nacimiento') <div class="invalid-feedback">{{ $message }}</div> @enderror
+                        </div>
+                        <div class="col-sm-6">
+                            <label class="form-label fw-semibold" for="entidad_nacimiento">Entidad de nacimiento</label>
+                            <select id="entidad_nacimiento" name="entidad_nacimiento" class="form-select @error('entidad_nacimiento') is-invalid @enderror">
+                                <option value="">-- Selecciona --</option>
+                                @foreach (\App\Services\Curp::ENTIDADES as $entidad)
+                                    <option value="{{ $entidad }}" @selected(old('entidad_nacimiento') === $entidad)>{{ $entidad }}</option>
+                                @endforeach
+                            </select>
+                            @error('entidad_nacimiento') <div class="invalid-feedback">{{ $message }}</div> @enderror
+                        </div>
+                        <div class="form-text mt-1">Si las dejas vacías se deducen de la CURP.</div>
+                    </div>
+
+                    <div class="row g-3 mb-4">
+                        <div class="col-sm-6">
+                            <label class="form-label fw-semibold" for="tipo_documento">Tipo de documento</label>
+                            <select id="tipo_documento" name="tipo_documento" class="form-select @error('tipo_documento') is-invalid @enderror" required>
+                                <option value="">-- Selecciona --</option>
+                                @foreach (\App\Models\Persona::TIPOS_DOCUMENTO as $tipo)
+                                    <option value="{{ $tipo }}" @selected(old('tipo_documento', $tipoPrellenado) === $tipo)>
+                                        {{ \App\Models\Persona::etiquetaTipo($tipo) }}
+                                    </option>
+                                @endforeach
+                            </select>
+                            @error('tipo_documento') <div class="invalid-feedback">{{ $message }}</div> @enderror
+                        </div>
+                        <div class="col-sm-6">
+                            <label class="form-label fw-semibold" for="numero_documento">Número de documento</label>
+                            <input type="text" id="numero_documento" name="numero_documento"
+                                   class="form-control font-monospace @error('numero_documento') is-invalid @enderror"
+                                   value="{{ old('numero_documento') }}">
+                            @error('numero_documento') <div class="invalid-feedback">{{ $message }}</div> @enderror
+                        </div>
+                    </div>
+
+                    <input type="file" id="archivo" name="archivo" accept=".jpg,.jpeg,.png,.webp,.pdf" class="d-none">
+                    <input type="hidden" name="texto_extraido" id="texto_extraido">
+
+                    <div class="d-flex justify-content-end">
+                        <button type="submit" class="btn btn-accent px-4">
+                            <i class="bi bi-check-lg"></i> Guardar
+                        </button>
+                    </div>
+                    @error('archivo') <div class="text-danger small mt-2">{{ $message }}</div> @enderror
+                </form>
             </div>
         </div>
     </div>
@@ -160,6 +166,8 @@
     const ocrTextoCrudoContenido = document.getElementById('ocr-texto-crudo-contenido');
     const formDocumento = document.getElementById('form-documento');
     const errorArchivo = document.getElementById('error-archivo');
+    const avisoPersona = document.getElementById('aviso-persona');
+    const curpVerificada = document.getElementById('curp-verificada');
 
     formDocumento.addEventListener('submit', function (e) {
         if (!inputArchivo.files.length) {
@@ -183,8 +191,9 @@
         previewNombre.textContent = file.name;
         previewPeso.textContent = formatoPeso(file.size);
         btnOcr.disabled = false;
-        ocrEstado.textContent = '';
+        ocrEstado.textContent = 'Listo. Pulsa "Extraer datos con OCR" para llenar el formulario automáticamente.';
         errorArchivo.hidden = true;
+        avisoPersona.hidden = true;
 
         if (file.type.startsWith('image/')) {
             previewImagen.src = URL.createObjectURL(file);
@@ -199,6 +208,12 @@
     dropzone.addEventListener('click', function (e) {
         if (e.target.closest('#btn-quitar')) return;
         inputArchivo.click();
+    });
+    dropzone.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            inputArchivo.click();
+        }
     });
 
     inputArchivo.addEventListener('change', function () {
@@ -234,6 +249,7 @@
         dropzoneVacio.classList.remove('d-none');
         dropzonePreview.classList.add('d-none');
         ocrEstado.textContent = '';
+        avisoPersona.hidden = true;
     });
 
     btnOcr.addEventListener('click', async function () {
@@ -245,12 +261,13 @@
         const boton = this;
         const textoOriginal = boton.innerHTML;
         boton.disabled = true;
-        boton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Procesando OCR...';
-        ocrEstado.textContent = 'Esto puede tardar unos segundos.';
+        boton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Analizando documento...';
+        ocrEstado.textContent = 'Esto puede tardar unos segundos (si la foto es difícil, se hacen varias lecturas).';
+        avisoPersona.hidden = true;
 
         const formData = new FormData();
         formData.append('archivo', inputArchivo.files[0]);
-        formData.append('_token', document.querySelector('input[name="_token"]').value);
+        formData.append('_token', document.querySelector('meta[name="csrf-token"]').content);
 
         try {
             const respuesta = await fetch('{{ route('documentos.ocr') }}', {
@@ -271,6 +288,7 @@
                 ['numero_documento', data.numero_documento],
                 ['fecha_nacimiento', data.fecha_nacimiento],
                 ['entidad_nacimiento', data.entidad_nacimiento],
+                ['tipo_documento', data.tipo_documento],
             ];
 
             let encontrados = 0;
@@ -281,6 +299,7 @@
                 }
             });
             document.getElementById('texto_extraido').value = data.texto || '';
+            curpVerificada.hidden = !data.curp_verificada;
 
             if (data.texto) {
                 ocrTextoCrudoContenido.textContent = data.texto;
@@ -289,9 +308,19 @@
                 ocrTextoCrudo.hidden = true;
             }
 
+            if (data.persona_existente) {
+                const p = data.persona_existente;
+                avisoPersona.className = 'small mt-3 p-3 rounded-3 ' + (p.ya_tiene_tipo ? 'badge-aviso' : 'badge-info');
+                avisoPersona.innerHTML = p.ya_tiene_tipo
+                    ? `<i class="bi bi-info-circle"></i> <strong>${escaparHtml(p.nombre)}</strong> ya tiene este documento. Si guardas, te preguntaremos si quieres reemplazarlo.`
+                    : `<i class="bi bi-person-check"></i> <strong>${escaparHtml(p.nombre)}</strong> ya está registrada. Este documento se agregará a su expediente.`
+                        + (p.faltantes.length ? `<div class="mt-1 text-muted">Le faltan: ${escaparHtml(p.faltantes.join(', '))}</div>` : '');
+                avisoPersona.hidden = false;
+            }
+
             ocrEstado.innerHTML = encontrados > 0
                 ? '<i class="bi bi-check-circle-fill text-success"></i> Datos extraídos. Revísalos y corrígelos antes de guardar.'
-                : '<i class="bi bi-exclamation-triangle-fill text-warning"></i> No se detectó ningún dato en la imagen. Completa los campos manualmente (revisa que la foto esté nítida y completa, y revisa abajo el texto que sí logró leer el OCR).';
+                : '<i class="bi bi-exclamation-triangle-fill text-warning"></i> No se detectó ningún dato. Completa los campos manualmente (revisa que la foto esté nítida y completa, y revisa abajo el texto que sí logró leer el OCR).';
         } catch (e) {
             ocrEstado.textContent = 'Error al conectar con el servidor.';
         } finally {

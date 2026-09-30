@@ -37,7 +37,7 @@ return [
 
     'tesseract' => [
         'executable' => env('TESSERACT_PATH', 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'),
-        'tessdata_dir' => env('TESSERACT_TESSDATA_DIR', storage_path('tessdata')),
+        'tessdata_dir' => env('TESSERACT_TESSDATA_DIR') ?: storage_path('tessdata'),
     ],
 
     'mutool' => [

@@ -5,42 +5,45 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreDocumentoRequest;
 use App\Models\Documento;
 use App\Models\Persona;
+use App\Services\Curp;
 use App\Services\DocumentoOcrService;
+use App\Services\Historial;
+use App\Services\RegistroDocumentos;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class DocumentoController extends Controller
 {
+    public function __construct(
+        private readonly DocumentoOcrService $ocr,
+        private readonly RegistroDocumentos $registro,
+    ) {}
+
     public function create(Request $request): View
     {
         return view('documentos.create', [
             'curpPrellenada' => $request->get('curp'),
             'nombrePrellenado' => $request->get('nombre_completo'),
+            'tipoPrellenado' => $request->get('tipo_documento'),
         ]);
     }
 
-    public function ocr(Request $request, DocumentoOcrService $ocr): JsonResponse
+    public function ocr(Request $request): JsonResponse
     {
         $request->validate([
-            'archivo' => ['required', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:10240'],
+            'archivo' => ['required', 'file', 'mimes:'.StoreDocumentoRequest::MIMES, 'max:10240'],
         ]);
 
-        $archivo = $request->file('archivo');
-        $extension = strtolower($archivo->getClientOriginalExtension());
-
-        if (! $ocr->soportaOcr($extension)) {
-            return response()->json([
-                'ok' => false,
-                'mensaje' => 'Ese formato de archivo no se puede procesar con OCR. Llena los datos manualmente.',
-            ]);
-        }
+        // Una foto difícil puede requerir varias pasadas de OCR.
+        set_time_limit(180);
 
         try {
-            $resultado = $ocr->extraer($archivo->getRealPath());
+            $resultado = $this->ocr->extraer($request->file('archivo')->getRealPath());
         } catch (\Throwable $e) {
             report($e);
 
@@ -51,20 +54,26 @@ class DocumentoController extends Controller
         }
 
         if (! empty($resultado['error'])) {
-            return response()->json([
-                'ok' => false,
-                'mensaje' => $resultado['error'],
-            ]);
+            return response()->json(['ok' => false, 'mensaje' => $resultado['error']]);
         }
+
+        $persona = $resultado['curp'] ? Persona::with('documentos')->where('curp', $resultado['curp'])->first() : null;
 
         return response()->json([
             'ok' => true,
             'texto' => $resultado['texto'],
             'curp' => $resultado['curp'],
-            'nombre_completo' => $resultado['nombre_completo'],
+            'curp_verificada' => $resultado['curp_verificada'],
+            'nombre_completo' => $persona?->nombre_completo ?? $resultado['nombre_completo'],
             'numero_documento' => $resultado['numero_documento'],
             'fecha_nacimiento' => $resultado['fecha_nacimiento'],
             'entidad_nacimiento' => $resultado['entidad_nacimiento'],
+            'tipo_documento' => $resultado['tipo_documento'],
+            'persona_existente' => $persona ? [
+                'nombre' => $persona->nombre_completo,
+                'faltantes' => array_map([Persona::class, 'etiquetaTipo'], $persona->documentosFaltantes()),
+                'ya_tiene_tipo' => $resultado['tipo_documento'] !== null && ! in_array($resultado['tipo_documento'], $persona->documentosFaltantes(), true),
+            ] : null,
         ]);
     }
 
@@ -74,134 +83,62 @@ class DocumentoController extends Controller
     }
 
     /**
-     * Procesa UN archivo de la carga masiva: hace OCR, adivina CURP y tipo
-     * de documento, y si tiene suficiente confianza lo guarda directo.
-     * Si la persona ya tiene ese tipo de documento, lo omite (no lo pisa
-     * automáticamente; para reemplazar se usa la subida individual).
-     * Si no logra detectar CURP o tipo, no guarda nada y regresa lo que sí
-     * pudo extraer para que se complete a mano.
+     * Procesa UN archivo de la carga masiva (el navegador los manda uno por
+     * uno): OCR + reglas de RegistroDocumentos. Guarda automáticamente lo
+     * que puede identificar con seguridad y regresa lo demás para revisión.
      */
-    public function cargaMasiva(Request $request, DocumentoOcrService $ocr): JsonResponse
+    public function cargaMasiva(Request $request): JsonResponse
     {
         $request->validate([
-            'archivo' => ['required', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:10240'],
+            'archivo' => ['required', 'file', 'mimes:'.StoreDocumentoRequest::MIMES, 'max:10240'],
         ]);
 
+        set_time_limit(180);
         $archivo = $request->file('archivo');
-        $nombreArchivo = $archivo->getClientOriginalName();
-
-        if (! $ocr->soportaOcr(strtolower($archivo->getClientOriginalExtension()))) {
-            return response()->json([
-                'status' => 'revision',
-                'archivo' => $nombreArchivo,
-                'mensaje' => 'Formato no soportado para OCR automático.',
-            ]);
-        }
 
         try {
-            $resultado = $ocr->extraer($archivo->getRealPath());
+            $resultado = $this->ocr->extraer($archivo->getRealPath());
         } catch (\Throwable $e) {
             report($e);
 
             return response()->json([
                 'status' => 'revision',
-                'archivo' => $nombreArchivo,
+                'archivo' => $archivo->getClientOriginalName(),
                 'mensaje' => 'No se pudo procesar el archivo con OCR.',
             ]);
         }
 
-        if (! empty($resultado['error'])) {
-            return response()->json([
-                'status' => 'revision',
-                'archivo' => $nombreArchivo,
-                'mensaje' => $resultado['error'],
-            ]);
-        }
-
-        $curp = $resultado['curp'];
-        $tipo = $resultado['tipo_documento'];
-
-        if (! $curp || ! $tipo) {
-            return response()->json([
-                'status' => 'revision',
-                'archivo' => $nombreArchivo,
-                'mensaje' => ! $curp
-                    ? 'No se pudo leer una CURP válida en el documento.'
-                    : 'No se pudo identificar el tipo de documento.',
-                'curp' => $curp,
-                'nombre_completo' => $resultado['nombre_completo'],
-                'numero_documento' => $resultado['numero_documento'],
-                'tipo_documento' => $tipo,
-            ]);
-        }
-
-        $persona = Persona::where('curp', $curp)->first();
-
-        if ($persona && $persona->documentos()->where('tipo_documento', $tipo)->exists()) {
-            return response()->json([
-                'status' => 'omitido',
-                'archivo' => $nombreArchivo,
-                'curp' => $curp,
-                'persona_nombre' => $persona->nombre_completo,
-                'tipo_documento' => $tipo,
-                'mensaje' => 'Esta persona ya tiene este tipo de documento; no se modificó.',
-            ]);
-        }
-
-        $esNueva = ! $persona;
-        if ($esNueva) {
-            $persona = Persona::create([
-                'curp' => $curp,
-                'nombre_completo' => $resultado['nombre_completo'] ?? 'Sin nombre (completar manualmente)',
-                'fecha_nacimiento' => $resultado['fecha_nacimiento'] ?? null,
-                'entidad_nacimiento' => $resultado['entidad_nacimiento'] ?? null,
-            ]);
-        }
-
-        $rutaArchivo = $archivo->store("uploads/{$persona->id}", 'public');
-
-        Documento::create([
-            'persona_id' => $persona->id,
-            'tipo_documento' => $tipo,
-            'numero_documento' => $resultado['numero_documento'] ?? null,
-            'ruta_archivo' => $rutaArchivo,
-            'texto_extraido' => $resultado['texto'] ?? null,
-        ]);
-
-        return response()->json([
-            'status' => 'guardado',
-            'archivo' => $nombreArchivo,
-            'curp' => $curp,
-            'persona_id' => $persona->id,
-            'persona_nombre' => $persona->nombre_completo,
-            'persona_nueva' => $esNueva,
-            'tipo_documento' => $tipo,
-        ]);
+        return response()->json($this->registro->registrarAutomatico($archivo, $resultado));
     }
 
     public function store(StoreDocumentoRequest $request): RedirectResponse
     {
         $datos = $request->validated();
 
+        if ($repetido = $this->registro->archivoRepetido($request->file('archivo'))) {
+            return redirect()
+                ->route('documentos.create')
+                ->withInput()
+                ->with('warning', 'Este mismo archivo ya está cargado como '.Persona::etiquetaTipo($repetido->tipo_documento).' de '.$repetido->persona->nombre_completo.'.');
+        }
+
         $persona = Persona::firstOrNew(['curp' => $datos['curp']]);
         $esNueva = ! $persona->exists;
         $nombreDistinto = false;
 
         if ($esNueva) {
-            $persona->nombre_completo = $datos['nombre_completo'];
-            if (! empty($datos['fecha_nacimiento'])) {
-                $persona->fecha_nacimiento = $datos['fecha_nacimiento'];
-            }
-            if (! empty($datos['entidad_nacimiento'])) {
-                $persona->entidad_nacimiento = $datos['entidad_nacimiento'];
-            }
-            $persona->save();
-        } elseif (mb_strtoupper(trim($datos['nombre_completo'])) !== mb_strtoupper(trim($persona->nombre_completo ?? ''))) {
+            $persona->fill([
+                'nombre_completo' => $datos['nombre_completo'],
+                'fecha_nacimiento' => $datos['fecha_nacimiento'] ?? Curp::fechaNacimiento($datos['curp']),
+                'entidad_nacimiento' => $datos['entidad_nacimiento'] ?? Curp::entidad($datos['curp']),
+            ])->save();
+        } else {
             // No sobrescribimos el nombre ya guardado con el que se acaba
             // de escribir: si no coincide, es más probable que sea un
             // error de captura (o CURP repetida por coincidencia) que un
             // cambio de nombre real, así que solo avisamos.
-            $nombreDistinto = true;
+            $nombreDistinto = RegistroDocumentos::similitudNombres($datos['nombre_completo'], $persona->nombre_completo ?? '') < 90;
+            $persona->completarDatosFaltantes($datos);
         }
 
         $documentoExistente = $persona->documentos()
@@ -212,11 +149,10 @@ class DocumentoController extends Controller
             // Guardamos el archivo nuevo en una carpeta temporal mientras
             // se confirma el reemplazo, para no pedirle al usuario que
             // vuelva a seleccionarlo.
-            $token = (string) Str::uuid();
             $rutaTemporal = $request->file('archivo')->store('temp', 'local');
 
             session()->put('confirmar_reemplazo', [
-                'token' => $token,
+                'token' => (string) Str::uuid(),
                 'ruta_temporal' => $rutaTemporal,
                 'persona_id' => $persona->id,
                 'tipo_documento' => $datos['tipo_documento'],
@@ -225,7 +161,7 @@ class DocumentoController extends Controller
                 'nombre_original' => $request->file('archivo')->getClientOriginalName(),
             ]);
 
-            $mensaje = 'Esta persona ya tiene un documento de tipo "'.$datos['tipo_documento'].'" registrado.';
+            $mensaje = 'Esta persona ya tiene un documento de tipo "'.Persona::etiquetaTipo($datos['tipo_documento']).'" registrado.';
             if ($nombreDistinto) {
                 $mensaje .= ' Además, el nombre que escribiste no coincide con "'.$persona->nombre_completo.'" (registrado); no se modificó.';
             }
@@ -236,19 +172,13 @@ class DocumentoController extends Controller
                 ->with('warning', $mensaje);
         }
 
-        $rutaArchivo = $request->file('archivo')->store("uploads/{$persona->id}", 'public');
+        $documento = $this->registro->guardar($persona, $request->file('archivo'), $datos);
 
-        Documento::create([
-            'persona_id' => $persona->id,
-            'tipo_documento' => $datos['tipo_documento'],
-            'numero_documento' => $datos['numero_documento'] ?? null,
-            'ruta_archivo' => $rutaArchivo,
-            'texto_extraido' => $datos['texto_extraido'] ?? null,
-        ]);
+        Historial::registrar('subida', 'Subida individual: '.Persona::etiquetaTipo($documento->tipo_documento)." de {$persona->nombre_completo} ({$persona->curp})");
 
         $mensaje = $esNueva
             ? 'Persona nueva creada y documento agregado correctamente.'
-            : 'Documento agregado correctamente.';
+            : 'Documento agregado al expediente existente.';
 
         if ($nombreDistinto) {
             $mensaje .= ' El nombre que escribiste no coincide con "'.$persona->nombre_completo.'" (registrado); no se modificó.';
@@ -263,35 +193,35 @@ class DocumentoController extends Controller
     {
         $pendiente = $request->session()->get('confirmar_reemplazo');
 
-        if (! $pendiente) {
+        if (! $pendiente || ! Storage::disk('local')->exists($pendiente['ruta_temporal'])) {
             return redirect()->route('documentos.create')
                 ->with('warning', 'No hay ningún reemplazo pendiente.');
         }
 
-        $documento = Documento::where('persona_id', $pendiente['persona_id'])
+        $documento = Documento::with('persona')
+            ->where('persona_id', $pendiente['persona_id'])
             ->where('tipo_documento', $pendiente['tipo_documento'])
             ->firstOrFail();
 
         // Elimina el archivo anterior y mueve el temporal a su ubicación final.
-        Storage::disk('public')->delete($documento->ruta_archivo);
+        Storage::disk(Documento::DISCO)->delete($documento->ruta_archivo);
 
-        $extension = pathinfo($pendiente['nombre_original'], PATHINFO_EXTENSION);
-        $rutaFinal = "uploads/{$pendiente['persona_id']}/".uniqid('doc_').'.'.$extension;
-
-        Storage::disk('public')->put(
-            $rutaFinal,
-            Storage::disk('local')->get($pendiente['ruta_temporal'])
-        );
-        Storage::disk('local')->delete($pendiente['ruta_temporal']);
+        $extension = strtolower(pathinfo($pendiente['nombre_original'], PATHINFO_EXTENSION));
+        $rutaFinal = "documentos/{$pendiente['persona_id']}/".Str::uuid().'.'.$extension;
+        Storage::disk(Documento::DISCO)->move($pendiente['ruta_temporal'], $rutaFinal);
 
         $documento->update([
             'ruta_archivo' => $rutaFinal,
+            'nombre_original' => $pendiente['nombre_original'],
+            'archivo_hash' => hash_file('sha256', Storage::disk(Documento::DISCO)->path($rutaFinal)),
             'numero_documento' => $pendiente['numero_documento'],
             'texto_extraido' => $pendiente['texto_extraido'] ?? null,
-            'fecha_carga' => now(),
+            'subido_por' => auth()->id(),
         ]);
 
         $request->session()->forget('confirmar_reemplazo');
+
+        Historial::registrar('reemplazo', 'Reemplazo de '.Persona::etiquetaTipo($documento->tipo_documento)." de {$documento->persona->nombre_completo}");
 
         return redirect()
             ->route('personas.show', $pendiente['persona_id'])
@@ -310,12 +240,34 @@ class DocumentoController extends Controller
         return redirect()->route('documentos.create');
     }
 
+    /**
+     * Sirve el archivo desde el disco privado: solo con sesión iniciada y
+     * dejando rastro en el historial.
+     */
+    public function archivo(Request $request, Documento $documento): BinaryFileResponse
+    {
+        $disco = Storage::disk(Documento::DISCO);
+        abort_unless($disco->exists($documento->ruta_archivo), 404);
+
+        // Las miniaturas de la ficha se cargan solas; solo se registra
+        // cuando alguien abre el documento a propósito.
+        $request->boolean('miniatura') || Historial::registrar('consulta', 'Consultó '.Persona::etiquetaTipo($documento->tipo_documento)." de {$documento->persona->nombre_completo}");
+
+        $nombre = $documento->nombre_original ?? basename($documento->ruta_archivo);
+        $respuesta = response()->file($disco->path($documento->ruta_archivo), ['X-Content-Type-Options' => 'nosniff']);
+        $respuesta->setContentDisposition('inline', str_replace(['/', '\\'], '_', $nombre), preg_replace('/[^A-Za-z0-9._-]/', '_', Str::ascii($nombre)));
+
+        return $respuesta;
+    }
+
     public function destroy(Documento $documento): RedirectResponse
     {
         $personaId = $documento->persona_id;
 
-        Storage::disk('public')->delete($documento->ruta_archivo);
+        Storage::disk(Documento::DISCO)->delete($documento->ruta_archivo);
         $documento->delete();
+
+        Historial::registrar('eliminacion', 'Eliminó '.Persona::etiquetaTipo($documento->tipo_documento)." de {$documento->persona->nombre_completo}");
 
         return redirect()
             ->route('personas.show', $personaId)

@@ -2,15 +2,38 @@
 
 namespace App\Services;
 
-use App\Http\Requests\StoreDocumentoRequest;
+use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Str;
 use thiagoalessio\TesseractOCR\TesseractOCR;
 
 class DocumentoOcrService
 {
-    // Tipos de archivo desde los que se puede extraer texto: imágenes
-    // directamente, y PDF convirtiendo su primera página a imagen con
-    // mutool (MuPDF) antes de pasarla a Tesseract.
-    public const EXTENSIONES_SOPORTADAS = ['jpg', 'jpeg', 'png', 'pdf'];
+    // Imágenes se leen directo; a los PDF primero se les intenta sacar el
+    // texto "nativo" (PDF digitales, p. ej. la constancia de CURP descargada
+    // de gob.mx) y, si son escaneos, se convierten a imagen con mutool.
+    public const EXTENSIONES_SOPORTADAS = ['jpg', 'jpeg', 'png', 'webp', 'pdf'];
+
+    // Un PDF con menos caracteres que esto en su texto nativo se considera
+    // escaneado (solo trae la imagen) y se pasa por OCR.
+    private const MIN_CARACTERES_TEXTO_NATIVO = 80;
+
+    private const MAX_PAGINAS_PDF = 3;
+
+    // Cada pasada rescata texto distinto en fotos difíciles (fondos de
+    // colores, hologramas, sombras). Se ejecutan en orden y se detienen en
+    // cuanto ya se tienen CURP verificada, tipo y nombre, así que una foto
+    // buena solo paga la primera.
+    //  gris        escala de grises + contraste, bloque uniforme (psm 6)
+    //  disperso    misma imagen, texto disperso (psm 11): no depende de columnas
+    //  normalizada fondo uniformado (ver normalizarFondo) + psm 6
+    //  bandas      imagen partida en franjas horizontales, cada una psm 6
+    private const PASADAS = [
+        ['imagen' => 'gris', 'psm' => 6],
+        ['imagen' => 'gris', 'psm' => 11],
+        ['imagen' => 'normalizada', 'psm' => 6],
+        ['imagen' => 'bandas', 'psm' => 6],
+        ['imagen' => 'normalizada', 'psm' => 11],
+    ];
 
     // Palabras de encabezado/etiquetas que NO son parte del nombre de la
     // persona; se usan para filtrar el respaldo heurístico de extraerNombre
@@ -21,259 +44,245 @@ class DocumentoOcrService
         'NACIMIENTO', 'BIRTH', 'DATE', 'PLACE', 'VIGENCIA', 'EXPIRY', 'EMISION', 'EMISIÓN', 'ISSUE',
         'ESTADO', 'STATE', 'REGISTRO', 'MUNICIPIO', 'LOCALIDAD', 'SECCION', 'SECCIÓN', 'FIRMA',
         'MUESTRA', 'SAMPLE', 'EXTRANJERO', 'ABROAD', 'UNITED', 'STATES', 'NOMBRE', 'NAME', 'EDAD',
+        'ACTA', 'CIVIL', 'ESTADOS', 'UNIDOS', 'MEXICANOS', 'CONSTANCIA', 'UNICA', 'ÚNICA', 'POBLACION',
+        'POBLACIÓN', 'PRIMER', 'SEGUNDO', 'APELLIDO', 'APELLIDOS', 'NOMBRES', 'EJEMPLO', 'FICTICIO', 'VALIDEZ', 'OFICIAL',
     ];
 
-    // Catálogo oficial de claves de entidad federativa que usa RENAPO en
-    // las posiciones 12-13 de la CURP (mismo listado que valida
-    // StoreDocumentoRequest::CURP_REGEX). No depende de ninguna API externa:
-    // es un catálogo fijo y público.
-    public const ENTIDADES_CURP = [
-        'AS' => 'Aguascalientes',
-        'BC' => 'Baja California',
-        'BS' => 'Baja California Sur',
-        'CC' => 'Campeche',
-        'CL' => 'Coahuila',
-        'CM' => 'Colima',
-        'CS' => 'Chiapas',
-        'CH' => 'Chihuahua',
-        'DF' => 'Ciudad de México',
-        'DG' => 'Durango',
-        'GT' => 'Guanajuato',
-        'GR' => 'Guerrero',
-        'HG' => 'Hidalgo',
-        'JC' => 'Jalisco',
-        'MC' => 'Estado de México',
-        'MN' => 'Michoacán',
-        'MS' => 'Morelos',
-        'NT' => 'Nayarit',
-        'NL' => 'Nuevo León',
-        'OC' => 'Oaxaca',
-        'PL' => 'Puebla',
-        'QO' => 'Querétaro',
-        'QR' => 'Quintana Roo',
-        'SP' => 'San Luis Potosí',
-        'SL' => 'Sinaloa',
-        'SR' => 'Sonora',
-        'TC' => 'Tabasco',
-        'TL' => 'Tlaxcala',
-        'TS' => 'Tamaulipas',
-        'VZ' => 'Veracruz',
-        'YN' => 'Yucatán',
-        'ZS' => 'Zacatecas',
-        'NE' => 'Nacido en el extranjero',
-    ];
+    // Etiquetas que marcan el fin del bloque del nombre.
+    private const FIN_BLOQUE_NOMBRE = '/DOMICILIO|CURP|CLAVE|SEXO|FECHA|VIGENCIA|REGISTRO|ESTADO|NACIONALIDAD|LUGAR|PADRE|MADRE|ENTIDAD|MUNICIPIO/i';
+
+    /** @var string[] archivos temporales creados durante una extracción */
+    private array $temporales = [];
+
+    public function __construct(private readonly ClasificadorDocumentos $clasificador) {}
 
     public function soportaOcr(string $extension): bool
     {
         return in_array(strtolower($extension), self::EXTENSIONES_SOPORTADAS, true);
     }
 
+    /**
+     * @return array{texto: string, curp: ?string, curp_verificada: bool, nombre_completo: ?string, numero_documento: ?string, fecha_nacimiento: ?string, entidad_nacimiento: ?string, tipo_documento: ?string, puntaje_tipo: float, metodo: string, error?: string}
+     */
     public function extraer(string $rutaArchivoAbsoluta): array
     {
-        $rutaPdfConvertida = null;
-        $rutaImagen = $rutaArchivoAbsoluta;
+        $this->temporales = [];
 
-        if ($this->esPdf($rutaArchivoAbsoluta)) {
-            $rutaPdfConvertida = $this->convertirPdfAImagen($rutaArchivoAbsoluta);
+        try {
+            if (! $this->esPdf($rutaArchivoAbsoluta)) {
+                return $this->leerImagenes([$rutaArchivoAbsoluta]) + ['metodo' => 'ocr_imagen'];
+            }
 
-            if ($rutaPdfConvertida === null) {
-                return [
-                    'texto' => '',
-                    'curp' => null,
-                    'nombre_completo' => null,
-                    'numero_documento' => null,
+            $textoNativo = $this->textoNativoPdf($rutaArchivoAbsoluta);
+
+            if (mb_strlen(preg_replace('/\s+/', '', $textoNativo)) >= self::MIN_CARACTERES_TEXTO_NATIVO) {
+                return $this->analizarTexto($textoNativo) + ['metodo' => 'pdf_texto'];
+            }
+
+            $paginas = $this->rasterizarPdf($rutaArchivoAbsoluta);
+
+            if ($paginas === []) {
+                return $this->analizarTexto('') + [
+                    'metodo' => 'pdf_escaneado_ocr',
                     'error' => 'No se pudo convertir el PDF a imagen. Revisa que mutool esté instalado y configurado (MUTOOL_PATH).',
                 ];
             }
 
-            $rutaImagen = $rutaPdfConvertida;
-        }
-
-        $rutaProcesada = $this->preprocesar($rutaImagen);
-
-        try {
-            // psm 6 (bloque uniforme) es el más preciso cuando funciona,
-            // pero en una credencial con foto + columnas de texto a veces
-            // no segmenta bien y devuelve muy poco o nada. Si pasa eso, se
-            // reintenta con psm 11 (texto disperso, sin asumir un bloque
-            // único) y se usa el resultado más largo de los dos.
-            $texto = $this->ejecutarTesseract($rutaProcesada, 6);
-
-            if ($this->calidadInsuficiente($texto)) {
-                $textoAlterno = $this->ejecutarTesseract($rutaProcesada, 11);
-
-                if (strlen(trim($textoAlterno)) > strlen(trim($texto))) {
-                    $texto = $textoAlterno;
-                }
-            }
+            return $this->leerImagenes($paginas) + ['metodo' => 'pdf_escaneado_ocr'];
         } finally {
-            if ($rutaProcesada !== $rutaImagen) {
-                @unlink($rutaProcesada);
+            foreach ($this->temporales as $temporal) {
+                @unlink($temporal);
             }
-            if ($rutaPdfConvertida !== null) {
-                @unlink($rutaPdfConvertida);
-            }
+            $this->temporales = [];
         }
-
-        $curp = $this->extraerCurp($texto);
-
-        return [
-            'texto' => $texto,
-            'curp' => $curp,
-            'nombre_completo' => $this->extraerNombre($texto),
-            'numero_documento' => $this->extraerNumeroDocumento($texto, $curp),
-            'fecha_nacimiento' => $this->extraerFechaNacimiento($texto, $curp),
-            'entidad_nacimiento' => $this->extraerEntidadNacimiento($curp),
-            'tipo_documento' => $this->detectarTipoDocumento($texto, $curp),
-        ];
     }
 
     /**
-     * Traduce las posiciones 12-13 de la CURP (clave de entidad federativa
-     * de RENAPO) al nombre completo del estado. Es un catálogo fijo de 32
-     * claves oficiales, así que no requiere ninguna API externa.
+     * Analiza un texto ya reconocido (sin volver a correr el OCR). Es público
+     * para poder probar la extracción con textos de ejemplo.
+     *
+     * @return array{texto: string, curp: ?string, curp_verificada: bool, nombre_completo: ?string, numero_documento: ?string, fecha_nacimiento: ?string, entidad_nacimiento: ?string, tipo_documento: ?string, puntaje_tipo: float}
      */
-    private function extraerEntidadNacimiento(?string $curp): ?string
+    public function analizarTexto(string $texto): array
     {
-        if ($curp === null || mb_strlen($curp) < 13) {
-            return null;
-        }
-
-        $clave = mb_substr($curp, 11, 2);
-
-        return self::ENTIDADES_CURP[$clave] ?? null;
+        return $this->combinar([$texto]);
     }
 
+    // ------------------------------------------------------------------
+    // Lectura de imágenes
+    // ------------------------------------------------------------------
+
     /**
-     * Adivina el tipo de documento a partir de palabras clave típicas de
-     * cada credencial. Es una heurística: para carga masiva se usa como
-     * primer filtro, pero siempre queda a la vista para corregirse a mano.
+     * @param  string[]  $rutas  una imagen por página
      */
-    public function detectarTipoDocumento(string $texto, ?string $curp): ?string
+    private function leerImagenes(array $rutas): array
     {
-        $limpio = strtoupper($texto);
+        $paginas = array_map(fn (string $ruta) => ['gris' => $this->prepararImagen($ruta)], $rutas);
+        $variantes = [];
+        $resultado = $this->combinar([]);
 
-        if (str_contains($limpio, 'PASAPORTE') || str_contains($limpio, 'PASSPORT')) {
-            return 'pasaporte';
+        foreach (self::PASADAS as $pasada) {
+            $textos = [];
+
+            foreach ($paginas as &$pagina) {
+                if ($pagina['gris'] === null) {
+                    continue;
+                }
+
+                $textos[] = match ($pasada['imagen']) {
+                    'bandas' => $this->leerPorBandas($pagina['gris'], $pasada['psm']),
+                    'normalizada' => $this->ejecutarTesseract($pagina['normalizada'] ??= $this->normalizarFondo($pagina['gris']), $pasada['psm']),
+                    default => $this->ejecutarTesseract($pagina['gris'], $pasada['psm']),
+                };
+            }
+            unset($pagina);
+
+            $texto = trim(implode("\n\n", $textos));
+
+            if ($texto !== '') {
+                $variantes[] = $texto;
+                $resultado = $this->combinar($variantes);
+            }
+
+            if ($resultado['curp_verificada'] && $resultado['tipo_documento'] && $resultado['nombre_completo']) {
+                break;
+            }
         }
 
-        if (str_contains($limpio, 'CARTILLA') || str_contains($limpio, 'SERVICIO MILITAR NACIONAL')) {
-            return 'cartilla_militar';
-        }
-
-        if (str_contains($limpio, 'LICENCIA') && (str_contains($limpio, 'CONDUCIR') || str_contains($limpio, 'CHOFER') || str_contains($limpio, 'MANEJO'))) {
-            return 'licencia_conducir';
-        }
-
-        if (str_contains($limpio, 'INSTITUTO NACIONAL ELECTORAL') || str_contains($limpio, 'CREDENCIAL PARA VOTAR') || str_contains($limpio, 'CLAVE DE ELECTOR')) {
-            return 'ine';
-        }
-
-        if (str_contains($limpio, 'REGISTRO NACIONAL DE POBLACION') || str_contains($limpio, 'RENAPO')) {
-            return 'curp';
-        }
-
-        // Si no hay palabras clave de ningún otro documento pero sí se
-        // encontró una CURP válida, lo más probable es que sea la
-        // constancia de CURP (que trae poco más que ese código).
-        if ($curp !== null) {
-            return 'curp';
-        }
-
-        return null;
+        return $resultado;
     }
 
     private function ejecutarTesseract(string $ruta, int $psm): string
     {
-        return (new TesseractOCR($ruta))
-            ->executable(config('services.tesseract.executable'))
-            ->tessdataDir(config('services.tesseract.tessdata_dir'))
-            ->lang('spa', 'eng')
-            ->psm($psm)
-            ->run();
-    }
-
-    private function calidadInsuficiente(string $texto): bool
-    {
-        return strlen(trim($texto)) < 25;
-    }
-
-    private function esPdf(string $ruta): bool
-    {
-        $cabecera = @file_get_contents($ruta, false, null, 0, 5);
-
-        return $cabecera !== false && str_starts_with($cabecera, '%PDF-');
+        try {
+            return (new TesseractOCR($ruta))
+                ->executable(config('services.tesseract.executable'))
+                ->tessdataDir(config('services.tesseract.tessdata_dir'))
+                ->lang('spa', 'eng')
+                ->psm($psm)
+                ->run();
+        } catch (\Throwable $e) {
+            // Tesseract falla con imágenes en las que no encuentra ningún
+            // texto; para nosotros eso es simplemente "no leyó nada".
+            return '';
+        }
     }
 
     /**
-     * Convierte la primera página del PDF a un PNG usando mutool (MuPDF),
-     * a 300 DPI para que el texto quede legible para Tesseract.
-     * Devuelve null si mutool no está configurado o falla.
+     * Carga la imagen, corrige orientación (EXIF y giros de 90/180/270
+     * grados), la escala y la pasa a gris con más contraste. Devuelve la ruta
+     * de un PNG temporal o null si GD no puede abrirla.
      */
-    private function convertirPdfAImagen(string $rutaPdf): ?string
-    {
-        $mutool = config('services.mutool.executable');
-
-        if (! $mutool || ! file_exists($mutool)) {
-            return null;
-        }
-
-        $rutaSalida = tempnam(sys_get_temp_dir(), 'pdf_').'.png';
-
-        $comando = sprintf(
-            '%s draw -o %s -r 300 %s 1 2>NUL',
-            escapeshellarg($mutool),
-            escapeshellarg($rutaSalida),
-            escapeshellarg($rutaPdf)
-        );
-
-        exec($comando, $salida, $codigo);
-
-        if ($codigo !== 0 || ! file_exists($rutaSalida)) {
-            @unlink($rutaSalida);
-
-            return null;
-        }
-
-        return $rutaSalida;
-    }
-
-    /**
-     * Escala y aumenta el contraste de la imagen antes de pasarla a
-     * Tesseract: las credenciales oficiales (INE, etc.) suelen tener
-     * patrones de fondo y texto pequeño que degradan mucho el OCR crudo.
-     * Devuelve la ruta original si no se puede procesar con GD.
-     */
-    private function preprocesar(string $ruta): string
+    private function prepararImagen(string $ruta): ?string
     {
         $datos = @file_get_contents($ruta);
-        $origen = $datos !== false ? @imagecreatefromstring($datos) : false;
+        $imagen = $datos !== false ? @imagecreatefromstring($datos) : false;
 
-        if ($origen === false) {
-            return $ruta;
+        if ($imagen === false) {
+            return null;
         }
 
-        $origen = $this->corregirOrientacion($origen, $ruta);
+        $imagen = $this->corregirOrientacionExif($imagen, $ruta);
 
-        $ancho = imagesx($origen);
-        $alto = imagesy($origen);
+        // Las credenciales traen texto pequeño: se amplía la imagen (sin
+        // pasarse, porque Tesseract se vuelve muy lento con imágenes enormes).
+        $ancho = imagesx($imagen);
+        $alto = imagesy($imagen);
         $anchoObjetivo = min(max($ancho * 2, 1600), 3200);
         $factor = $anchoObjetivo / $ancho;
-        $nuevoAncho = (int) round($ancho * $factor);
-        $nuevoAlto = (int) round($alto * $factor);
 
-        $destino = imagecreatetruecolor($nuevoAncho, $nuevoAlto);
-        imagecopyresampled($destino, $origen, 0, 0, 0, 0, $nuevoAncho, $nuevoAlto, $ancho, $alto);
-        imagedestroy($origen);
+        $escalada = imagecreatetruecolor((int) round($ancho * $factor), (int) round($alto * $factor));
+        imagecopyresampled($escalada, $imagen, 0, 0, 0, 0, imagesx($escalada), imagesy($escalada), $ancho, $alto);
+        imagedestroy($imagen);
 
-        imagefilter($destino, IMG_FILTER_GRAYSCALE);
-        imagefilter($destino, IMG_FILTER_CONTRAST, -40);
+        imagefilter($escalada, IMG_FILTER_GRAYSCALE);
+        imagefilter($escalada, IMG_FILTER_CONTRAST, -40);
 
-        $rutaTemp = tempnam(sys_get_temp_dir(), 'ocr_').'.png';
-        imagepng($destino, $rutaTemp);
-        imagedestroy($destino);
+        return $this->corregirGiro($escalada);
+    }
 
-        return $rutaTemp;
+    /**
+     * Si la imagen está de lado o de cabeza, Tesseract devuelve basura.
+     * Primero se pregunta al detector de orientación de Tesseract (OSD); si
+     * no está seguro, se lee la imagen tal cual y, si casi no trae palabras
+     * reconocibles, se prueban los otros tres giros y gana el que lee más.
+     */
+    private function corregirGiro(\GdImage $imagen): string
+    {
+        $ruta = $this->guardarTemporal($imagen, false);
+        $giro = $this->detectarGiro($ruta);
+
+        if ($giro !== 0) {
+            // OSD dice cuántos grados girar en sentido horario;
+            // imagerotate gira en sentido antihorario.
+            $girada = imagerotate($imagen, 360 - $giro, imagecolorallocate($imagen, 255, 255, 255));
+
+            if ($girada !== false) {
+                imagedestroy($imagen);
+
+                return $this->guardarTemporal($girada);
+            }
+        }
+
+        $mejorRuta = $ruta;
+        $mejorPuntaje = $this->puntajeLectura($this->ejecutarTesseract($mejorRuta, 6));
+
+        foreach ([90, 270, 180] as $grados) {
+            if ($mejorPuntaje >= 8) {
+                break;
+            }
+
+            $girada = imagerotate($imagen, $grados, imagecolorallocate($imagen, 255, 255, 255));
+
+            if ($girada === false) {
+                continue;
+            }
+
+            $rutaGirada = $this->guardarTemporal($girada);
+            $puntaje = $this->puntajeLectura($this->ejecutarTesseract($rutaGirada, 6));
+
+            if ($puntaje > $mejorPuntaje) {
+                [$mejorRuta, $mejorPuntaje] = [$rutaGirada, $puntaje];
+            }
+        }
+
+        imagedestroy($imagen);
+
+        return $mejorRuta;
+    }
+
+    /**
+     * Grados (0, 90, 180 o 270, sentido horario) que hay que girar la imagen
+     * según el detector de orientación de Tesseract (--psm 0). Devuelve 0 si
+     * no hay suficiente confianza o si OSD no está disponible.
+     */
+    private function detectarGiro(string $ruta): int
+    {
+        try {
+            $resultado = Process::timeout(60)->run([
+                config('services.tesseract.executable'), $ruta, 'stdout',
+                '--psm', '0', '--tessdata-dir', config('services.tesseract.tessdata_dir'),
+            ]);
+        } catch (\Throwable $e) {
+            return 0;
+        }
+
+        $salida = $resultado->output().$resultado->errorOutput();
+
+        if (! preg_match('/Rotate:\s*(\d+)/', $salida, $giro) || ! preg_match('/Orientation confidence:\s*([\d.]+)/', $salida, $confianza)) {
+            return 0;
+        }
+
+        return (float) $confianza[1] >= 2.0 && in_array((int) $giro[1], [90, 180, 270], true) ? (int) $giro[1] : 0;
+    }
+
+    /**
+     * Cuenta palabras "reales" (3+ letras seguidas): un texto de lado se
+     * reconoce como símbolos sueltos y casi no tiene ninguna.
+     */
+    private function puntajeLectura(string $texto): int
+    {
+        return (int) preg_match_all('/\b[A-ZÁÉÍÓÚÑa-záéíóúñ]{3,}\b/u', $texto);
     }
 
     /**
@@ -281,9 +290,9 @@ class DocumentoOcrService
      * metadato EXIF en vez de rotar los píxeles de verdad; si no se corrige,
      * Tesseract recibe el texto de lado y no reconoce prácticamente nada.
      */
-    private function corregirOrientacion(\GdImage $imagen, string $ruta): \GdImage
+    private function corregirOrientacionExif(\GdImage $imagen, string $ruta): \GdImage
     {
-        $exif = @exif_read_data($ruta);
+        $exif = function_exists('exif_read_data') ? @exif_read_data($ruta) : false;
 
         if ($exif === false || empty($exif['Orientation'])) {
             return $imagen;
@@ -305,76 +314,299 @@ class DocumentoOcrService
         return $rotada;
     }
 
-    private function extraerCurp(string $texto): ?string
-    {
-        return $this->extraerCurpPorEtiqueta($texto) ?? $this->extraerCurpEstricta($texto);
-    }
-
     /**
-     * Búsqueda estricta contra el patrón oficial de 18 caracteres, en todo
-     * el texto reconocido (sin usar la etiqueta "CURP" como referencia). Es
-     * exacta pero frágil: basta con que el OCR confunda UNA sola letra (p.
-     * ej. una "D" leída como "O") en cualquiera de los 18 caracteres para
-     * que no encuentre nada, así que solo se usa como último recurso.
+     * Prepara fotos con fondo de colores, hologramas y sombras:
+     * 1) toma el canal más oscuro de cada píxel (el texto es oscuro en todos
+     *    los canales; los fondos de color no),
+     * 2) estima el fondo (imagen muy reducida y vuelta a ampliar) y divide
+     *    entre él, lo que elimina degradados y sombras.
+     * Se trabaja a un máximo de 2000 px porque el recorrido píxel a píxel en
+     * PHP es lento.
      */
-    private function extraerCurpEstricta(string $texto): ?string
+    private function normalizarFondo(string $rutaGris): string
     {
-        $limpio = strtoupper(preg_replace('/[^A-Z0-9]/i', '', $texto));
+        $origen = @imagecreatefrompng($rutaGris);
 
-        // Quita el "/" final del regex de validación para poder buscarlo
-        // como substring dentro de todo el texto reconocido.
-        $patron = str_replace(['/', '^', '$'], '', StoreDocumentoRequest::CURP_REGEX);
-
-        if (preg_match('/'.$patron.'/', $limpio, $match)) {
-            return $match[0];
+        if ($origen === false) {
+            return $rutaGris;
         }
 
-        return null;
+        $factor = min(1, 2000 / max(imagesx($origen), imagesy($origen)));
+        $w = (int) round(imagesx($origen) * $factor);
+        $h = (int) round(imagesy($origen) * $factor);
+        $imagen = imagescale($origen, $w, $h, IMG_BICUBIC) ?: $origen;
+
+        if ($imagen !== $origen) {
+            imagedestroy($origen);
+        }
+
+        $lado = max(16, (int) round(max($w, $h) / 40));
+        $pequena = imagescale($imagen, max(8, intdiv($w, $lado)), max(8, intdiv($h, $lado)), IMG_BILINEAR_FIXED);
+        $fondo = imagescale($pequena, $w, $h, IMG_BICUBIC);
+        imagedestroy($pequena);
+
+        for ($y = 0; $y < $h; $y++) {
+            for ($x = 0; $x < $w; $x++) {
+                $pixel = imagecolorat($imagen, $x, $y);
+                $minimo = min(($pixel >> 16) & 255, ($pixel >> 8) & 255, $pixel & 255);
+                $claridadFondo = max(1, imagecolorat($fondo, $x, $y) & 255);
+                $valor = min(255, (int) ($minimo / $claridadFondo * 235));
+                imagesetpixel($imagen, $x, $y, ($valor << 16) | ($valor << 8) | $valor);
+            }
+        }
+
+        imagedestroy($fondo);
+
+        return $this->guardarTemporal($imagen);
     }
 
     /**
-     * Busca la etiqueta "CURP" y, cerca de ella, un token de 18 caracteres
-     * con la FORMA general de una CURP (4 letras, 6 dígitos de fecha, sexo,
-     * 2 letras de entidad, 3 letras, diferenciador, dígito verificador). A
-     * diferencia del patrón oficial estricto, no exige que esas 3 letras
-     * sean consonantes de una lista específica ni que la entidad esté en el
-     * catálogo oficial: el OCR confunde letras parecidas (O/D, O/0, etc.)
-     * justo en esa zona, y la posición cerca de la etiqueta ya da suficiente
-     * confianza, así que basta con validar que los 6 dígitos formen una
-     * fecha real.
+     * El análisis de página completa falla con fondos recargados, pero lee
+     * bien franjas pequeñas. Las franjas se solapan para no partir una
+     * línea de texto a la mitad.
      */
-    private function extraerCurpPorEtiqueta(string $texto): ?string
+    private function leerPorBandas(string $rutaGris, int $psm): string
     {
-        $lineas = preg_split('/\r\n|\r|\n/', $texto);
+        $imagen = @imagecreatefrompng($rutaGris);
 
-        foreach ($lineas as $i => $linea) {
-            if (! preg_match('/\bCURP\b/i', $linea)) {
+        if ($imagen === false) {
+            return '';
+        }
+
+        $w = imagesx($imagen);
+        $h = imagesy($imagen);
+        $textos = [];
+
+        foreach ([[0.0, 0.45], [0.3, 0.75], [0.55, 1.0]] as [$desde, $hasta]) {
+            $y = (int) round($h * $desde);
+            $franja = imagecrop($imagen, ['x' => 0, 'y' => $y, 'width' => $w, 'height' => (int) round($h * $hasta) - $y]);
+
+            if ($franja === false) {
                 continue;
             }
 
-            for ($j = $i; $j < count($lineas) && $j <= $i + 3; $j++) {
-                $limpio = strtoupper(preg_replace('/[^A-Z0-9]/i', '', $lineas[$j]));
+            $textos[] = $this->ejecutarTesseract($this->guardarTemporal($franja), $psm);
+        }
 
-                if (! preg_match('/[A-Z]{4}(\d{2})(\d{2})(\d{2})[HM][A-Z]{2}[A-Z]{3}[A-Z0-9]\d/', $limpio, $match)) {
-                    continue;
-                }
+        imagedestroy($imagen);
 
-                [, $anioCorto, $mes, $dia] = $match;
+        return implode("\n", $textos);
+    }
 
-                if (checkdate((int) $mes, (int) $dia, 2000 + (int) $anioCorto) || checkdate((int) $mes, (int) $dia, 1900 + (int) $anioCorto)) {
-                    return $match[0];
-                }
+    private function guardarTemporal(\GdImage $imagen, bool $destruir = true): string
+    {
+        $ruta = sys_get_temp_dir().DIRECTORY_SEPARATOR.'ocr_'.Str::random(12).'.png';
+        imagepng($imagen, $ruta);
+        $this->temporales[] = $ruta;
+
+        if ($destruir) {
+            imagedestroy($imagen);
+        }
+
+        return $ruta;
+    }
+
+    // ------------------------------------------------------------------
+    // PDF (mutool / MuPDF)
+    // ------------------------------------------------------------------
+
+    private function esPdf(string $ruta): bool
+    {
+        $cabecera = @file_get_contents($ruta, false, null, 0, 5);
+
+        return $cabecera !== false && str_starts_with($cabecera, '%PDF-');
+    }
+
+    private function mutool(): ?string
+    {
+        $mutool = config('services.mutool.executable');
+
+        return $mutool && file_exists($mutool) ? $mutool : null;
+    }
+
+    private function textoNativoPdf(string $rutaPdf): string
+    {
+        if (! $mutool = $this->mutool()) {
+            return '';
+        }
+
+        $resultado = Process::timeout(60)->run([$mutool, 'draw', '-F', 'txt', '-o', '-', $rutaPdf, '1-'.self::MAX_PAGINAS_PDF]);
+
+        return $resultado->successful() ? $resultado->output() : '';
+    }
+
+    /**
+     * Convierte las primeras páginas del PDF a PNG a 300 DPI para que el
+     * texto quede legible para Tesseract.
+     *
+     * @return string[]
+     */
+    private function rasterizarPdf(string $rutaPdf): array
+    {
+        if (! $mutool = $this->mutool()) {
+            return [];
+        }
+
+        $base = sys_get_temp_dir().DIRECTORY_SEPARATOR.'pdf_'.Str::random(12);
+        $resultado = Process::timeout(120)->run([$mutool, 'draw', '-o', $base.'_%d.png', '-r', '300', $rutaPdf, '1-'.self::MAX_PAGINAS_PDF]);
+
+        $paginas = glob($base.'_*.png') ?: [];
+        natsort($paginas);
+        array_push($this->temporales, ...$paginas);
+
+        return $resultado->successful() ? array_values($paginas) : [];
+    }
+
+    // ------------------------------------------------------------------
+    // Análisis del texto reconocido
+    // ------------------------------------------------------------------
+
+    /**
+     * Junta el resultado de varias lecturas del mismo documento: cada
+     * lectura puede haber captado partes distintas, así que por cada dato se
+     * elige el mejor candidato entre todas.
+     *
+     * @param  string[]  $variantes
+     */
+    private function combinar(array $variantes): array
+    {
+        $curp = $this->elegirCurp($variantes);
+        $clasificacion = $this->clasificador->clasificar(implode("\n", $variantes));
+        $tipo = $clasificacion['tipo'];
+
+        $nombre = null;
+        foreach ($variantes as $texto) {
+            $candidato = $this->extraerNombre($texto, $curp['curp']);
+
+            if ($candidato !== null && ($nombre === null || $candidato['prioridad'] > $nombre['prioridad'])) {
+                $nombre = $candidato;
             }
         }
 
-        return null;
+        $numero = null;
+        foreach ($variantes as $texto) {
+            $candidato = $this->extraerNumeroDocumento($texto, $curp['curp'], $tipo);
+
+            if ($candidato !== null && ($numero === null || ($candidato['especifico'] && ! $numero['especifico']))) {
+                $numero = $candidato;
+            }
+        }
+
+        // Con una CURP verificada, la fecha que trae es más confiable que la
+        // que se lea de la etiqueta (que el OCR deforma con facilidad).
+        $fecha = $curp['verificada'] ? Curp::fechaNacimiento($curp['curp']) : null;
+        foreach ($variantes as $texto) {
+            $fecha ??= $this->extraerFechaPorEtiqueta($texto);
+        }
+        if ($fecha === null && $curp['curp'] !== null) {
+            $fecha = Curp::fechaNacimiento($curp['curp']);
+        }
+
+        $textoPrincipal = collect($variantes)->sortByDesc(fn (string $t) => mb_strlen($t))->first() ?? '';
+
+        return [
+            'texto' => $textoPrincipal,
+            'curp' => $curp['curp'],
+            'curp_verificada' => $curp['verificada'],
+            'nombre_completo' => $nombre['valor'] ?? null,
+            'numero_documento' => $numero['valor'] ?? null,
+            'fecha_nacimiento' => $fecha,
+            'entidad_nacimiento' => $curp['curp'] !== null ? Curp::entidad($curp['curp']) : null,
+            'tipo_documento' => $tipo,
+            'puntaje_tipo' => $clasificacion['puntaje'],
+        ];
     }
 
-    private function extraerNombre(string $texto): ?string
+    /**
+     * Junta los candidatos a CURP de todas las lecturas. Gana la que pasa el
+     * dígito verificador; entre iguales, la que más lecturas coinciden.
+     *
+     * @param  string[]  $variantes
+     * @return array{curp: ?string, verificada: bool}
+     */
+    private function elegirCurp(array $variantes): array
+    {
+        $votos = [];
+
+        foreach ($variantes as $texto) {
+            foreach ($this->candidatosCurp($texto) as $candidato) {
+                $corregida = Curp::corregir($candidato);
+
+                if ($corregida['curp'] === null) {
+                    continue;
+                }
+
+                $clave = $corregida['curp'];
+                $votos[$clave] ??= ['verificada' => $corregida['verificada'], 'votos' => 0];
+                $votos[$clave]['votos']++;
+            }
+        }
+
+        if ($votos === []) {
+            return ['curp' => null, 'verificada' => false];
+        }
+
+        uasort($votos, fn ($a, $b) => [$b['verificada'], $b['votos']] <=> [$a['verificada'], $a['votos']]);
+        $curp = array_key_first($votos);
+
+        return ['curp' => $curp, 'verificada' => $votos[$curp]['verificada']];
+    }
+
+    /**
+     * Tokens de 18 caracteres con la FORMA general de una CURP (4 letras,
+     * 6 "dígitos", sexo, 5 letras, diferenciador, verificador), permitiendo
+     * letras y dígitos confundidos: Curp::corregir decide si es válida.
+     * Se buscan en cada línea sin espacios (el OCR a veces parte la CURP) y,
+     * con prioridad, cerca de la etiqueta "CURP".
+     *
+     * @return string[]
+     */
+    private function candidatosCurp(string $texto): array
+    {
+        $forma = '/[A-Z0-9]{4}[0-9OQDILZSGB]{6}[HMX][A-Z0-9]{5}[A-Z0-9][0-9OQDILZSGB]/';
+        $lineas = preg_split('/\r\n|\r|\n/', strtoupper($texto));
+        $cercaDeEtiqueta = [];
+        $resto = [];
+
+        foreach ($lineas as $i => $linea) {
+            $limpia = preg_replace('/[^A-Z0-9]/', '', $linea);
+
+            if (! preg_match_all($forma, $limpia, $matches)) {
+                continue;
+            }
+
+            $cerca = false;
+            for ($j = max(0, $i - 3); $j <= $i; $j++) {
+                $cerca = $cerca || str_contains($lineas[$j], 'CURP');
+            }
+
+            if ($cerca) {
+                array_push($cercaDeEtiqueta, ...$matches[0]);
+            } else {
+                array_push($resto, ...$matches[0]);
+            }
+        }
+
+        return [...$cercaDeEtiqueta, ...$resto];
+    }
+
+    /**
+     * @return array{valor: string, prioridad: int}|null
+     */
+    private function extraerNombre(string $texto, ?string $curp): ?array
     {
         $lineas = preg_split('/\r\n|\r|\n/', $texto);
+        $porEtiqueta = $this->extraerNombrePorEtiqueta($lineas);
 
-        return $this->extraerNombrePorEtiqueta($lineas) ?? $this->extraerNombrePorHeuristica($lineas);
+        if ($porEtiqueta !== null) {
+            $ordenado = $this->ordenarNombreConCurp($porEtiqueta, $curp);
+
+            return ['valor' => $ordenado['valor'], 'prioridad' => $ordenado['verificado'] ? 3 : 2];
+        }
+
+        $heuristico = $this->extraerNombrePorHeuristica($lineas);
+
+        return $heuristico !== null ? ['valor' => $heuristico, 'prioridad' => 1] : null;
     }
 
     /**
@@ -383,58 +615,122 @@ class DocumentoOcrService
     private function extraerNombrePorEtiqueta(array $lineas): ?string
     {
         foreach ($lineas as $i => $linea) {
-            if (preg_match('/NOMBRE/i', $linea)) {
-                // En la INE el nombre viene repartido en varias líneas
-                // (apellido paterno, materno y nombre(s)) tras la etiqueta
-                // "NOMBRE", así que se concatenan hasta topar con la
-                // siguiente etiqueta del documento.
-                $partes = [];
-                $lineasRevisadas = 0;
-                // Cuenta solo líneas con contenido: el OCR a veces mete
-                // líneas vacías de relleno entre cada dato (columnas
-                // vecinas), y si contaran contra el límite se agotaba antes
-                // de llegar al nombre de pila.
-                for ($j = $i + 1; $j < count($lineas) && $lineasRevisadas < 4; $j++) {
-                    $candidata = trim($lineas[$j]);
+            if (! preg_match('/NOMBRE/i', $linea) || preg_match('/PADRE|MADRE/i', $linea)) {
+                continue;
+            }
 
-                    if ($candidata === '') {
-                        continue;
-                    }
+            $partes = [];
 
-                    $lineasRevisadas++;
+            // En el acta y la constancia de CURP el valor puede venir en la
+            // misma línea que la etiqueta ("Nombre(s): JUAN ...").
+            $resto = preg_replace('/.*?NOMBRE\(?S?\)?\s*:?/iu', '', $linea, 1);
+            $enLinea = $this->palabrasDeNombre($resto);
+            if ($enLinea !== '') {
+                $partes[] = $enLinea;
+            }
 
-                    if (preg_match('/DOMICILIO|CURP|CLAVE|SEXO|FECHA|VIGENCIA|REGISTRO|ESTADO/i', $candidata)) {
-                        break;
-                    }
+            // En la INE el nombre viene repartido en varias líneas
+            // (apellido paterno, materno y nombre(s)) tras la etiqueta
+            // "NOMBRE", así que se concatenan hasta topar con la
+            // siguiente etiqueta del documento.
+            $lineasRevisadas = 0;
+            // Cuenta solo líneas con contenido: el OCR a veces mete
+            // líneas vacías de relleno entre cada dato (columnas
+            // vecinas), y si contaran contra el límite se agotaba antes
+            // de llegar al nombre de pila.
+            for ($j = $i + 1; $j < count($lineas) && $lineasRevisadas < 4; $j++) {
+                $candidata = trim($lineas[$j]);
 
-                    // Una línea de domicilio/otros campos casi siempre trae
-                    // números; una línea de nombre real, no. Se usa como
-                    // corte de bloque en vez de exigir que TODA la línea sea
-                    // mayúsculas, porque el OCR suele pegar basura suelta (un
-                    // símbolo o letra de una columna vecina) al inicio o
-                    // final de la línea sin afectar el nombre en sí.
-                    if (preg_match('/\d/', $candidata)) {
-                        break;
-                    }
-
-                    // Cada "palabra" debe EMPEZAR con 2+ mayúsculas (así se
-                    // descarta basura suelta en minúsculas de una columna
-                    // vecina), pero se le permite arrastrar minúsculas
-                    // pegadas al final: el OCR a veces junta dos nombres sin
-                    // espacio y solo le baja el caso a la segunda mitad
-                    // (p. ej. "CARLOSALExis").
-                    if (preg_match_all('/[A-ZÁÉÍÓÚÑ]{2,}[a-záéíóúñ]*(?:\s+[A-ZÁÉÍÓÚÑ]{2,}[a-záéíóúñ]*)*/u', $candidata, $coincidencias) && $coincidencias[0] !== []) {
-                        $partes[] = mb_strtoupper(implode(' ', $coincidencias[0]));
-                    }
+                if ($candidata === '') {
+                    continue;
                 }
 
-                if ($partes !== []) {
-                    return implode(' ', $partes);
+                // Renglón que solo trae etiquetas ("Primer apellido
+                // Segundo apellido"): se salta sin contarlo.
+                if (preg_match('/APELLIDO|NOMBRE/i', $candidata) && $this->palabrasDeNombre($candidata) === '') {
+                    continue;
                 }
+
+                $lineasRevisadas++;
+
+                if (preg_match(self::FIN_BLOQUE_NOMBRE, $candidata)) {
+                    break;
+                }
+
+                // Una línea de domicilio/otros campos casi siempre trae
+                // números; una línea de nombre real, no. Se usa como
+                // corte de bloque en vez de exigir que TODA la línea sea
+                // mayúsculas, porque el OCR suele pegar basura suelta (un
+                // símbolo o letra de una columna vecina) al inicio o
+                // final de la línea sin afectar el nombre en sí.
+                if (preg_match('/\d/', $candidata)) {
+                    break;
+                }
+
+                $palabras = $this->palabrasDeNombre($candidata);
+                if ($palabras !== '') {
+                    $partes[] = $palabras;
+                }
+            }
+
+            if ($partes !== []) {
+                return implode(' ', $partes);
             }
         }
 
         return null;
+    }
+
+    /**
+     * Cada "palabra" debe EMPEZAR con 2+ mayúsculas (así se descarta
+     * basura suelta en minúsculas de una columna vecina), pero se le
+     * permite arrastrar minúsculas pegadas al final: el OCR a veces junta
+     * dos nombres sin espacio y solo le baja el caso a la segunda mitad
+     * (p. ej. "CARLOSALExis"). Las etiquetas conocidas se descartan.
+     */
+    private function palabrasDeNombre(string $texto): string
+    {
+        if (! preg_match_all('/[A-ZÁÉÍÓÚÑ]{2,}[a-záéíóúñ]*/u', $texto, $coincidencias)) {
+            return '';
+        }
+
+        $palabras = array_filter(
+            array_map('mb_strtoupper', $coincidencias[0]),
+            fn (string $palabra) => ! in_array($palabra, self::RUIDO_NOMBRE, true)
+        );
+
+        return implode(' ', $palabras);
+    }
+
+    /**
+     * La INE imprime "APELLIDOS NOMBRE(S)" y el acta/constancia suelen
+     * imprimir "NOMBRE(S) APELLIDOS". Para guardar siempre en el mismo
+     * orden (apellidos primero, como la INE) se prueba cuál de los dos
+     * acomodos coincide con las iniciales de la CURP.
+     *
+     * @return array{valor: string, verificado: bool}
+     */
+    private function ordenarNombreConCurp(string $nombre, ?string $curp): array
+    {
+        $palabras = preg_split('/\s+/', trim($nombre));
+
+        if ($curp === null || count($palabras) < 3) {
+            return ['valor' => $nombre, 'verificado' => false];
+        }
+
+        [$paterno, $materno] = $palabras;
+        if (Curp::coincideConNombre($curp, $paterno, $materno, implode(' ', array_slice($palabras, 2)))) {
+            return ['valor' => $nombre, 'verificado' => true];
+        }
+
+        $paterno = $palabras[count($palabras) - 2];
+        $materno = $palabras[count($palabras) - 1];
+        $nombres = implode(' ', array_slice($palabras, 0, -2));
+        if (Curp::coincideConNombre($curp, $paterno, $materno, $nombres)) {
+            return ['valor' => "{$paterno} {$materno} {$nombres}", 'verificado' => true];
+        }
+
+        return ['valor' => $nombre, 'verificado' => false];
     }
 
     /**
@@ -486,99 +782,95 @@ class DocumentoOcrService
         return $palabras !== [] ? implode(' ', $palabras) : null;
     }
 
-    /**
-     * Busca la etiqueta "FECHA DE NACIMIENTO" seguida de una fecha en el
-     * texto reconocido. Si no aparece (o el OCR la deformó), la deriva de
-     * la CURP: los primeros 6 dígitos son AAMMDD, y el siglo se determina
-     * con el dígito diferenciador (posición 17): dígito = nacido antes de
-     * 2000, letra = nacido en 2000 o después.
-     */
-    private function extraerFechaNacimiento(string $texto, ?string $curp): ?string
+    private function extraerFechaPorEtiqueta(string $texto): ?string
     {
-        if (preg_match('/FECHA\s+DE\s+NACIMIENTO[^0-9]{0,20}(\d{1,2})[\/\-. ](\d{1,2})[\/\-. ](\d{2,4})/i', $texto, $match)) {
-            $dia = (int) $match[1];
-            $mes = (int) $match[2];
-            $anio = strlen($match[3]) === 2 ? $this->expandirAnioDesdeCurp($match[3], '0') : (int) $match[3];
-
-            if (checkdate($mes, $dia, $anio)) {
-                return sprintf('%04d-%02d-%02d', $anio, $mes, $dia);
-            }
+        if (! preg_match('/FECHA\s+DE\s+NACIMIENTO[^0-9]{0,20}(\d{1,2})[\/\-. ](\d{1,2})[\/\-. ](\d{2,4})/i', $texto, $match)) {
+            return null;
         }
 
-        if ($curp !== null) {
-            return $this->fechaDesdeCurp($curp);
+        $dia = (int) $match[1];
+        $mes = (int) $match[2];
+        $anio = (int) $match[3];
+
+        if (strlen($match[3]) === 2) {
+            $anio += $anio + 2000 > (int) date('Y') ? 1900 : 2000;
+        }
+
+        return checkdate($mes, $dia, $anio) ? sprintf('%04d-%02d-%02d', $anio, $mes, $dia) : null;
+    }
+
+    /**
+     * Primero busca el número con el formato propio de cada documento
+     * ("específico"); si no, cae a una heurística genérica.
+     *
+     * @return array{valor: string, especifico: bool}|null
+     */
+    private function extraerNumeroDocumento(string $texto, ?string $curp, ?string $tipo): ?array
+    {
+        $mayusculas = mb_strtoupper($texto);
+        $sinEspacios = preg_replace('/[^A-Z0-9\n]/', '', $mayusculas);
+
+        $especifico = match ($tipo) {
+            // La constancia de CURP no tiene otro número: su número es la CURP.
+            'curp' => $curp,
+            // Clave de elector: 6 letras + 8 dígitos + sexo + 3 dígitos.
+            'ine' => preg_match('/[A-Z]{6}\d{8}[HMX]\d{3}/', $sinEspacios, $m) ? $m[0] : null,
+            'pasaporte' => preg_match('/\b[A-Z]\d{8}\b/', $mayusculas, $m) ? $m[0] : null,
+            'cartilla_militar' => preg_match('/MATR[IÍ]CULA\W{0,5}([A-Z]?-?\d{6,9})/u', $mayusculas, $m) ? $m[1] : null,
+            'acta_nacimiento' => $this->numeroDeActa($mayusculas),
+            default => null,
+        };
+
+        if ($especifico !== null) {
+            return ['valor' => $especifico, 'especifico' => true];
+        }
+
+        // En el acta los números sueltos (libro, foja, oficialía, fechas)
+        // confundirían a la heurística genérica.
+        if ($tipo === 'acta_nacimiento') {
+            return null;
+        }
+
+        // Heurística genérica: busca tokens alfanuméricos tipo "clave de
+        // elector"/folio (mezclan letras y números), descartando la CURP ya
+        // detectada o cualquier otra cosa con forma de CURP.
+        if (preg_match_all('/\b[A-Z0-9]{9,18}\b/', $mayusculas, $matches)) {
+            foreach ($matches[0] as $candidata) {
+                if ($candidata === $curp || Curp::corregir($candidata)['curp'] !== null) {
+                    continue;
+                }
+
+                if (preg_match('/[A-Z]/', $candidata) && preg_match('/\d/', $candidata)) {
+                    return ['valor' => $candidata, 'especifico' => false];
+                }
+            }
         }
 
         return null;
     }
 
-    private function fechaDesdeCurp(string $curp): ?string
-    {
-        // Igual que en extraerCurpPorEtiqueta: no se exige que las 3 letras
-        // de las posiciones 14-16 sean consonantes de la lista oficial. Si
-        // la CURP vino del método relajado (con una letra rara ahí por un
-        // error de OCR), exigirlo aquí otra vez tiraría la fecha a la
-        // basura aunque la CURP ya se haya aceptado.
-        if (! preg_match('/^[A-Z]{4}(\d{2})(\d{2})(\d{2})[HM][A-Z]{2}[A-Z]{3}([A-Z\d])\d$/', $curp, $match)) {
-            return null;
-        }
-
-        [, $anioCorto, $mes, $dia, $diferenciador] = $match;
-        $anio = $this->expandirAnioDesdeCurp($anioCorto, $diferenciador);
-        $mes = (int) $mes;
-        $dia = (int) $dia;
-
-        if (! checkdate($mes, $dia, $anio)) {
-            return null;
-        }
-
-        return sprintf('%04d-%02d-%02d', $anio, $mes, $dia);
-    }
-
     /**
-     * El dígito diferenciador (posición 17 de la CURP) indica el siglo,
-     * pero en el OCR es una fuente de errores muy común: "0" y "O" son
-     * visualmente idénticos y Tesseract los confunde seguido. Por eso el
-     * resultado de ese dígito solo se usa si da un año plausible (no futuro
-     * y no una edad absurda); si no, se usa el otro siglo.
+     * En el formato único de acta, "Número de acta" es la última columna
+     * del renglón de etiquetas y su valor queda en el renglón de abajo; en
+     * formatos viejos va en la misma línea ("ACTA No. 00123").
      */
-    private function expandirAnioDesdeCurp(string $anioCorto, string $diferenciador): int
+    private function numeroDeActa(string $texto): ?string
     {
-        $anioCorto = (int) $anioCorto;
-        $candidato = (ctype_digit($diferenciador) ? 1900 : 2000) + $anioCorto;
+        $lineas = array_values(array_filter(array_map('trim', preg_split('/\r\n|\r|\n/', $texto))));
+        $etiqueta = '/(N[UÚ]MERO|N[UÚ]M\.?|NO\.?)\s*(DE\s+)?ACTA|ACTA\s*(N[UÚ]M\.?|NO\.?|N[°º])/u';
 
-        if ($this->anioEsPlausible($candidato)) {
-            return $candidato;
-        }
+        foreach ($lineas as $i => $linea) {
+            if (! preg_match($etiqueta, $linea, $m, PREG_OFFSET_CAPTURE)) {
+                continue;
+            }
 
-        return ($candidato >= 2000 ? 1900 : 2000) + $anioCorto;
-    }
+            $despues = substr($linea, $m[0][1] + strlen($m[0][0]));
+            if (preg_match('/^\W{0,5}(\d{1,6})\b/', $despues, $numero)) {
+                return $numero[1];
+            }
 
-    private function anioEsPlausible(int $anio): bool
-    {
-        $anioActual = (int) date('Y');
-
-        return $anio <= $anioActual && ($anioActual - $anio) <= 115;
-    }
-
-    private function extraerNumeroDocumento(string $texto, ?string $curp): ?string
-    {
-        // Heurística genérica: busca tokens alfanuméricos tipo "clave de
-        // elector"/folio (mezclan letras y números), ignorando palabras del
-        // encabezado del documento que no tienen dígitos y descartando la
-        // CURP ya detectada (no debe proponerse dos veces).
-        if (preg_match_all('/\b[A-Z0-9]{9,18}\b/', strtoupper($texto), $matches)) {
-            foreach ($matches[0] as $candidata) {
-                if ($candidata === $curp) {
-                    continue;
-                }
-
-                $tieneLetra = (bool) preg_match('/[A-Z]/', $candidata);
-                $tieneDigito = (bool) preg_match('/\d/', $candidata);
-
-                if ($tieneLetra && $tieneDigito) {
-                    return $candidata;
-                }
+            if (isset($lineas[$i + 1]) && preg_match_all('/\b\d{1,6}\b/', $lineas[$i + 1], $numeros)) {
+                return end($numeros[0]);
             }
         }
 
