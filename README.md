@@ -6,6 +6,46 @@ Sistema web en **Laravel 13** para integrar el expediente de cada persona (INE, 
 
 ---
 
+## 🚀 Cómo probarlo (5 minutos)
+
+### Usuario para entrar
+
+| Correo | Contraseña |
+|---|---|
+| `admin@gestion.test` | `Admin12345` |
+
+> No es un correo real: es solo el usuario de acceso. La app **no envía ni recibe correos**. Esta cuenta se crea automáticamente al ejecutar `php artisan migrate --seed` (paso 4). Se puede cambiar en `.env` con `ADMIN_EMAIL` y `ADMIN_PASSWORD` antes de ese paso.
+
+### Pasos
+
+1. Instalar **PHP 8.3**, **Composer** y **MySQL** (por ejemplo con [Laragon](https://laragon.org)).
+2. Instalar **Tesseract OCR** ([instalador para Windows](https://github.com/UB-Mannheim/tesseract/wiki)) y **mutool** para leer PDF (`winget install ArtifexSoftware.mutool`). El sistema los encuentra solo si están en la ruta normal de instalación o en el PATH.
+3. Descargar el proyecto e instalar dependencias:
+   ```bash
+   git clone https://github.com/MarrioWiz/gestion-documentos-ocr.git
+   cd gestion-documentos-ocr
+   composer install
+   cp .env.example .env
+   php artisan key:generate
+   ```
+4. Crear una base de datos vacía llamada `gestion_documentos` (si MySQL tiene contraseña, ponerla en `DB_PASSWORD` del `.env`) y ejecutar:
+   ```bash
+   php artisan migrate --seed
+   php artisan serve
+   ```
+5. Abrir **http://127.0.0.1:8000** y entrar con el usuario de arriba.
+
+### Qué probar
+
+1. **Carga masiva** → subir `tests/Fixtures/documentos/carlos_ine.png` y `carlos_curp.pdf`: se registra a *Carlos Daniel Mendoza Ruiz* con 2 documentos.
+2. **Carga masiva** otra vez → subir los tres archivos de Carlos (`carlos_ine.png`, `carlos_curp.pdf`, `carlos_acta.jpg`): la INE y la CURP aparecen como **"Ya existía"** y el acta se **agrega sola** a su expediente.
+3. Subir `maria_acta_escaneada.pdf`, `maria_curp_girada.jpg` (foto de lado) y `julian_ine.webp`: se registran dos personas nuevas.
+4. Revisar **Personas** (checklist y % de avance), **Panel** (estadísticas), **Historial** (auditoría) y **Reporte** (Excel).
+
+Todos los documentos de `tests/Fixtures/documentos` son **ficticios**, generados para este proyecto.
+
+---
+
 ## Funcionalidades
 
 | Módulo | Qué hace |
@@ -80,8 +120,9 @@ DB_DATABASE=gestion_documentos
 DB_USERNAME=root
 DB_PASSWORD=
 
+# Opcionales: solo si Tesseract o mutool no están en su ruta normal ni en el PATH
 TESSERACT_PATH="C:/Program Files/Tesseract-OCR/tesseract.exe"
-MUTOOL_PATH="C:/ruta/a/mutool.exe"
+MUTOOL_PATH=
 
 ADMIN_EMAIL=admin@gestion.test
 ADMIN_PASSWORD=Admin12345

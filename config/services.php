@@ -35,13 +35,30 @@ return [
         ],
     ],
 
+    // Si la ruta del .env no existe (o viene vacía), se busca el programa en
+    // el PATH del sistema y en su carpeta de instalación típica, para que el
+    // proyecto funcione en otra computadora sin tener que escribir rutas.
     'tesseract' => [
-        'executable' => env('TESSERACT_PATH', 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'),
+        'executable' => (function () {
+            foreach ([env('TESSERACT_PATH'), 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe', '/usr/bin/tesseract', '/opt/homebrew/bin/tesseract'] as $ruta) {
+                if ($ruta && is_file($ruta)) {
+                    return $ruta;
+                }
+            }
+
+            return (new \Symfony\Component\Process\ExecutableFinder)->find('tesseract', 'tesseract');
+        })(),
         'tessdata_dir' => env('TESSERACT_TESSDATA_DIR') ?: storage_path('tessdata'),
     ],
 
     'mutool' => [
-        'executable' => env('MUTOOL_PATH'),
+        'executable' => (function () {
+            $configurado = env('MUTOOL_PATH');
+
+            return $configurado && is_file($configurado)
+                ? $configurado
+                : (new \Symfony\Component\Process\ExecutableFinder)->find('mutool');
+        })(),
     ],
 
 ];
