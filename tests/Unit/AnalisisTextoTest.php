@@ -162,6 +162,22 @@ class AnalisisTextoTest extends TestCase
         $this->assertNull(NombreEnCurp::enTexto($texto, 'LOGF951103MJCPRR08'));
     }
 
+    public function test_etiquetas_intercaladas_y_apellido_compuesto(): void
+    {
+        $texto = 'Nombre(s): JOSE MANUEL Primer apellido: HERNANDEZ Segundo apellido: DE LA CRUZ';
+
+        $this->assertSame('HERNANDEZ DE LA CRUZ JOSE MANUEL', NombreEnCurp::enTexto($texto, 'HECM851230HOCRRN09'));
+    }
+
+    public function test_pasaporte_prefiere_la_parte_visual_sobre_la_franja_mecanica(): void
+    {
+        $texto = "Apellidos / Surname\nORTIZ PEÑA\nNombres / Given names\nFOTO XIMENA\nP<MEXORTIZ<PEXA<<XIMENA<<<<<<<<";
+
+        $this->assertSame('ORTIZ PEÑA XIMENA', NombreEnCurp::enTexto($texto, 'OIPX070125MYNRXMA0'));
+        // Sin parte visual legible, la franja mecánica sirve de respaldo.
+        $this->assertSame('ORTIZ PEXA XIMENA', NombreEnCurp::enTexto('P<MEXORTIZ<PEXA<<XIMENA<<<<<<<<', 'OIPX070125MYNRXMA0'));
+    }
+
     public function test_un_nombre_que_no_cuadra_con_la_curp_no_se_marca_como_verificado(): void
     {
         // INE borrosa: la etiqueta "NOMBRE" va seguida del domicilio.

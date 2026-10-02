@@ -158,6 +158,12 @@ En `tests/Fixtures/documentos` hay documentos **ficticios** para probar el siste
 
 Para regenerarlos: `php artisan documentos:generar-ejemplos`
 
+**Segundo juego (4 personas con expediente completo):** INE, CURP, acta, pasaporte, licencia y cartilla militar, con casos difíciles: INE de cabeza, licencia borrosa sin CURP legible, apellido compuesto ("DE LA CRUZ"), Ñ y menor de edad sin INE.
+
+```bash
+php artisan documentos:generar-ejemplos --set=extra --dir="C:/ruta/de/salida"
+```
+
 ## Pruebas automáticas
 
 ```bash

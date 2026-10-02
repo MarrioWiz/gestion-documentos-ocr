@@ -15,6 +15,11 @@ class NombreEnCurp
 {
     private const PARTICULAS = ['DE', 'DEL', 'LA', 'LAS', 'LOS', 'Y', 'MC', 'VAN', 'VON'];
 
+    // Etiquetas que van JUNTO al nombre ("Nombre(s): JOSE  Primer apellido:
+    // HERNANDEZ", "Apellidos / Surname ... Nombres / Given names"): se saltan
+    // sin cortar, para que el nombre quede completo aunque esté intercalado.
+    private const ETIQUETAS_DEL_NOMBRE = ['NOMBRE', 'NOMBRES', 'PRIMER', 'SEGUNDO', 'APELLIDO', 'APELLIDOS', 'SURNAME', 'SURNAMES', 'GIVEN', 'NAME', 'NAMES', 'FOTO', 'PHOTO'];
+
     /**
      * Revisa cada renglón y también 2-3 renglones juntos, porque la INE
      * parte el nombre en varios. Devuelve el nombre en orden
@@ -23,6 +28,19 @@ class NombreEnCurp
      * @param  string[]  $lineas
      */
     public static function buscar(array $lineas, string $curp): ?string
+    {
+        // La zona de lectura mecánica del pasaporte ("P<MEXORTIZ<PEXA<<...")
+        // escribe la Ñ como X y sin acentos: solo se usa si el nombre no
+        // aparece en la parte visual del documento.
+        $sinMrz = array_filter($lineas, fn (string $l) => ! str_contains($l, '<<'));
+
+        return self::buscarEn($sinMrz, $curp) ?? self::buscarEn($lineas, $curp);
+    }
+
+    /**
+     * @param  string[]  $lineas
+     */
+    private static function buscarEn(array $lineas, string $curp): ?string
     {
         $lineas = array_values(array_filter(array_map('trim', $lineas), fn (string $l) => $l !== ''));
         $ruido = array_map([Curp::class, 'sinAcentos'], DocumentoOcrService::RUIDO_NOMBRE);
@@ -69,13 +87,17 @@ class NombreEnCurp
         $actual = [];
         $particulas = '';
 
+        // Zona de lectura mecánica del pasaporte: "P<MEXPEREZ<LOPEZ<<JUAN".
+        $texto = str_replace('<', ' ', preg_replace('/P<MEX/u', ' ', $texto));
+
         foreach (preg_split('/\s+/u', $texto) as $token) {
             $palabra = trim($token, ".,;:()\"'");
             $esNombre = preg_match('/^[A-ZÁÉÍÓÚÜÑ]+$/u', $palabra) && ! in_array(Curp::sinAcentos($palabra), $ruido, true);
             $letras = preg_match_all('/\p{L}/u', $palabra);
             $esBasuraCorta = ! $esNombre && ! preg_match('/\d/', $palabra) && $letras <= 2;
+            $esEtiquetaDelNombre = in_array(preg_replace('/[^A-Z]/', '', Curp::sinAcentos($palabra)), self::ETIQUETAS_DEL_NOMBRE, true);
 
-            if ($esBasuraCorta) {
+            if ($esBasuraCorta || $esEtiquetaDelNombre) {
                 continue;
             }
 

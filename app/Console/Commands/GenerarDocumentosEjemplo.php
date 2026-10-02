@@ -14,8 +14,8 @@ use Illuminate\Support\Facades\Process;
  * sin usar documentos de personas reales. Cada archivo lleva la leyenda
  * "EJEMPLO FICTICIO".
  */
-#[Signature('documentos:generar-ejemplos {--dir= : Carpeta de salida (por defecto tests/Fixtures/documentos)}')]
-#[Description('Genera INE, CURP y actas de nacimiento ficticias para probar el OCR.')]
+#[Signature('documentos:generar-ejemplos {--dir= : Carpeta de salida (por defecto tests/Fixtures/documentos)} {--set=basico : "basico" (3 personas de las pruebas) o "extra" (4 personas con expediente completo)}')]
+#[Description('Genera documentos de identidad ficticios (INE, CURP, acta, pasaporte, licencia, cartilla) para probar el OCR.')]
 class GenerarDocumentosEjemplo extends Command
 {
     private const PERSONAS = [
@@ -36,6 +36,38 @@ class GenerarDocumentosEjemplo extends Command
             'curp17' => 'SAVJ870214HQTNLL0', 'nacimiento' => '14/02/1987', 'sexo' => 'HOMBRE',
             'entidad' => 'QUERETARO', 'municipio' => 'QUERETARO', 'clave_elector' => 'SNVLJL87021422H100',
             'padre' => 'RAUL SANCHEZ ORTIZ', 'madre' => 'ELENA VELA CRUZ', 'acta' => '02210',
+        ],
+
+        // Segundo juego (--set=extra): expedientes completos con pasaporte,
+        // licencia y cartilla, y casos difíciles (apellido compuesto, Ñ,
+        // "JOSÉ" como primer nombre, menor de edad sin INE).
+        'ana' => [
+            'paterno' => 'GUTIERREZ', 'materno' => 'NAVARRO', 'nombres' => 'ANA SOFIA',
+            'curp17' => 'GUNA030418MNLTVNA', 'nacimiento' => '18/04/2003', 'sexo' => 'MUJER',
+            'entidad' => 'NUEVO LEON', 'municipio' => 'MONTERREY', 'clave_elector' => 'GTNVAN03041819M200',
+            'padre' => 'RICARDO GUTIERREZ SOLIS', 'madre' => 'PATRICIA NAVARRO REYES', 'acta' => '03318',
+            'pasaporte' => 'G48213097', 'licencia' => 'NL2219843', 'matricula' => null,
+        ],
+        'luis' => [
+            'paterno' => 'RAMIREZ', 'materno' => 'TORRES', 'nombres' => 'LUIS ALBERTO',
+            'curp17' => 'RATL920905HDFMRS0', 'nacimiento' => '05/09/1992', 'sexo' => 'HOMBRE',
+            'entidad' => 'CIUDAD DE MEXICO', 'municipio' => 'COYOACAN', 'clave_elector' => 'RMTRLS92090509H400',
+            'padre' => 'ARTURO RAMIREZ VEGA', 'madre' => 'GLORIA TORRES MEJIA', 'acta' => '07741',
+            'pasaporte' => null, 'licencia' => 'A09281746', 'matricula' => 'D-1847263',
+        ],
+        'jose' => [
+            'paterno' => 'HERNANDEZ', 'materno' => 'DE LA CRUZ', 'nombres' => 'JOSE MANUEL',
+            'curp17' => 'HECM851230HOCRRN0', 'nacimiento' => '30/12/1985', 'sexo' => 'HOMBRE',
+            'entidad' => 'OAXACA', 'municipio' => 'OAXACA DE JUAREZ', 'clave_elector' => 'HRCRMN85123020H700',
+            'padre' => 'MANUEL HERNANDEZ LOPEZ', 'madre' => 'TERESA DE LA CRUZ SANTIAGO', 'acta' => '00912',
+            'pasaporte' => null, 'licencia' => 'OX7730215', 'matricula' => null,
+        ],
+        'ximena' => [
+            'paterno' => 'ORTIZ', 'materno' => 'PEÑA', 'nombres' => 'XIMENA',
+            'curp17' => 'OIPX070125MYNRXMA', 'nacimiento' => '25/01/2007', 'sexo' => 'MUJER',
+            'entidad' => 'YUCATAN', 'municipio' => 'MERIDA', 'clave_elector' => null,
+            'padre' => 'FERNANDO ORTIZ CAN', 'madre' => 'LUCIA PEÑA DZUL', 'acta' => '04406',
+            'pasaporte' => 'G77105432', 'licencia' => null, 'matricula' => null,
         ],
     ];
 
@@ -59,6 +91,10 @@ class GenerarDocumentosEjemplo extends Command
             mkdir($dir, 0775, true);
         }
 
+        if ($this->option('set') === 'extra') {
+            return $this->generarJuegoExtra($dir);
+        }
+
         $carlos = $this->persona('carlos');
         $maria = $this->persona('maria');
         $julian = $this->persona('julian');
@@ -80,6 +116,53 @@ class GenerarDocumentosEjemplo extends Command
         }
         $this->info("Documentos de ejemplo generados en {$dir}");
         $this->line('CURP ficticias: '.implode(', ', array_column([$carlos, $maria, $julian], 'curp')));
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Expedientes completos de 4 personas nuevas, en formatos variados.
+     */
+    private function generarJuegoExtra(string $dir): int
+    {
+        $ana = $this->persona('ana');
+        $luis = $this->persona('luis');
+        $jose = $this->persona('jose');
+        $ximena = $this->persona('ximena');
+
+        // Ana: expediente completo con pasaporte.
+        imagejpeg($this->ine($ana), "{$dir}/ana_ine.jpg", 90);
+        $this->pdfConTexto($this->lineasConstanciaCurp($ana), "{$dir}/ana_curp.pdf");
+        imagepng($this->acta($ana), "{$dir}/ana_acta.png");
+        imagejpeg($this->pasaporte($ana), "{$dir}/ana_pasaporte.jpg", 90);
+        imagejpeg($this->licencia($ana), "{$dir}/ana_licencia.jpg", 90);
+
+        // Luis: con cartilla militar y licencia; su INE fotografiada de cabeza.
+        imagejpeg(imagerotate($this->ine($luis), 180, 0), "{$dir}/luis_ine_de_cabeza.jpg", 90);
+        $this->pdfConTexto($this->lineasConstanciaCurp($luis), "{$dir}/luis_curp.pdf");
+        imagejpeg($this->acta($luis), "{$dir}/luis_acta.jpg", 90);
+        imagepng($this->cartilla($luis), "{$dir}/luis_cartilla_militar.png");
+        imagewebp($this->licencia($luis), "{$dir}/luis_licencia.webp", 90);
+
+        // José Manuel: apellido compuesto y licencia BORROSA (sin CURP
+        // legible): en carga masiva se reconoce por su nombre al final.
+        imagepng($this->ine($jose), "{$dir}/jose_ine.png");
+        imagepng($this->constanciaCurp($jose), "{$dir}/jose_curp.png");
+        imagepng($this->acta($jose), "{$dir}/jose_acta.png");
+        $this->convertirAPdf("{$dir}/jose_acta.png", "{$dir}/jose_acta_escaneada.pdf");
+        @unlink("{$dir}/jose_acta.png");
+        imagejpeg($this->desenfocar($this->licencia($jose)), "{$dir}/jose_licencia_borrosa.jpg", 70);
+
+        // Ximena: menor de edad (sin INE), con Ñ en el apellido.
+        $this->pdfConTexto($this->lineasConstanciaCurp($ximena), "{$dir}/ximena_curp.pdf");
+        imagejpeg($this->acta($ximena), "{$dir}/ximena_acta.jpg", 90);
+        imagepng($this->pasaporte($ximena), "{$dir}/ximena_pasaporte.png");
+
+        foreach (glob("{$dir}/*") as $archivo) {
+            $this->line('  '.basename($archivo));
+        }
+        $this->info("Documentos de ejemplo generados en {$dir}");
+        $this->line('CURP ficticias: '.implode(', ', array_column([$ana, $luis, $jose, $ximena], 'curp')));
 
         return self::SUCCESS;
     }
@@ -213,6 +296,137 @@ class GenerarDocumentosEjemplo extends Command
         $this->leyendaFicticia($img);
 
         return $img;
+    }
+
+    // ---------------------------------------------------------- Pasaporte
+
+    private function pasaporte(array $p): \GdImage
+    {
+        $img = $this->lienzo(1250, 880, [233, 240, 236], [214, 228, 222]);
+        $tinta = imagecolorallocate($img, 20, 30, 30);
+        $gris = imagecolorallocate($img, 80, 90, 95);
+        $verde = imagecolorallocate($img, 18, 74, 62);
+        [$dia, $mes, $anio] = explode('/', $p['nacimiento']);
+
+        $this->texto($img, 60, 70, 22, 'ESTADOS UNIDOS MEXICANOS', $verde, true);
+        $this->texto($img, 60, 105, 18, 'PASAPORTE / PASSPORT', $verde, true);
+        $this->texto($img, 760, 70, 14, 'SECRETARIA DE RELACIONES EXTERIORES', $gris);
+
+        imagefilledrectangle($img, 60, 150, 330, 500, imagecolorallocate($img, 200, 205, 210));
+        $this->texto($img, 150, 335, 16, 'FOTO', $gris, true);
+
+        $x = 380;
+        $this->texto($img, $x, 160, 13, 'Tipo / Type   P        Clave del país / Code   MEX', $gris);
+        $this->texto($img, $x + 520, 160, 13, 'Pasaporte No. / Passport No.', $gris);
+        $this->texto($img, $x + 520, 190, 20, $p['pasaporte'] ?? '', $tinta, true);
+        $this->texto($img, $x, 225, 13, 'Apellidos / Surname', $gris);
+        $this->texto($img, $x, 255, 20, $p['paterno'].' '.$p['materno'], $tinta, true);
+        $this->texto($img, $x, 295, 13, 'Nombres / Given names', $gris);
+        $this->texto($img, $x, 325, 20, $p['nombres'], $tinta, true);
+        $this->texto($img, $x, 365, 13, 'Nacionalidad / Nationality   MEXICANA', $gris);
+        $this->texto($img, $x, 400, 13, 'Fecha de nacimiento / Date of birth', $gris);
+        $this->texto($img, $x, 428, 18, "{$dia} {$mes} {$anio}", $tinta, true);
+        $this->texto($img, $x + 420, 400, 13, 'Sexo / Sex', $gris);
+        $this->texto($img, $x + 420, 428, 18, $p['sexo'][0] === 'H' ? 'M' : 'F', $tinta, true);
+        $this->texto($img, $x, 468, 13, 'CURP', $gris);
+        $this->texto($img, $x, 496, 18, $p['curp'], $tinta, true);
+        $this->texto($img, $x, 536, 13, 'Lugar de nacimiento / Place of birth   '.$p['entidad'], $gris);
+
+        // Zona de lectura mecánica (MRZ).
+        $mono = imagecolorallocate($img, 15, 15, 15);
+        $nombreMrz = str_replace(' ', '<', Curp::sinAcentos($p['paterno'].'<'.$p['materno'].'<<'.$p['nombres']));
+        $this->texto($img, 60, 700, 22, str_pad('P<MEX'.$nombreMrz, 44, '<'), $mono, true);
+        $this->texto($img, 60, 745, 22, str_pad(($p['pasaporte'] ?? '').'<0MEX'.substr($anio, 2).$mes.$dia, 44, '<'), $mono, true);
+
+        $this->leyendaFicticia($img);
+
+        return $img;
+    }
+
+    // ----------------------------------------------------------- Licencia
+
+    private function licencia(array $p): \GdImage
+    {
+        $img = $this->lienzo(1012, 638, [226, 236, 248], [244, 238, 226]);
+        $tinta = imagecolorallocate($img, 20, 25, 40);
+        $gris = imagecolorallocate($img, 85, 90, 105);
+        $azul = imagecolorallocate($img, 25, 60, 130);
+
+        $this->texto($img, 300, 48, 20, 'LICENCIA PARA CONDUCIR', $azul, true);
+        $this->texto($img, 300, 78, 14, 'ESTADO DE '.$p['entidad'].'  ·  SECRETARIA DE MOVILIDAD', $azul);
+
+        imagefilledrectangle($img, 32, 110, 262, 400, imagecolorallocate($img, 200, 200, 212));
+        $this->texto($img, 105, 265, 16, 'FOTO', $gris, true);
+
+        $x = 300;
+        $this->texto($img, $x, 130, 13, 'No. DE LICENCIA', $gris);
+        $this->texto($img, $x + 170, 130, 17, $p['licencia'] ?? '', $tinta, true);
+        $this->texto($img, $x + 470, 130, 13, 'TIPO  A  AUTOMOVILISTA', $gris);
+        $this->texto($img, $x, 175, 13, 'NOMBRE', $gris);
+        $this->texto($img, $x, 205, 21, $p['nombres'], $tinta, true);
+        $this->texto($img, $x, 235, 21, $p['paterno'].' '.$p['materno'], $tinta, true);
+        $this->texto($img, $x, 280, 13, 'CURP', $gris);
+        $this->texto($img, $x + 70, 280, 17, $p['curp'], $tinta, true);
+        $this->texto($img, $x, 320, 13, 'FECHA DE NACIMIENTO', $gris);
+        $this->texto($img, $x + 230, 320, 17, $p['nacimiento'], $tinta, true);
+        $this->texto($img, $x, 360, 13, 'EXPEDICION 08/07/2024', $gris);
+        $this->texto($img, $x + 260, 360, 13, 'VIGENCIA 06/07/2027', $gris);
+
+        $this->leyendaFicticia($img);
+
+        return $img;
+    }
+
+    // ----------------------------------------------------------- Cartilla
+
+    private function cartilla(array $p): \GdImage
+    {
+        $img = $this->lienzo(1100, 760, [236, 232, 214], [222, 216, 194]);
+        $tinta = imagecolorallocate($img, 30, 30, 20);
+        $gris = imagecolorallocate($img, 90, 88, 70);
+        $verde = imagecolorallocate($img, 52, 70, 30);
+
+        $this->texto($img, 300, 70, 20, 'SECRETARIA DE LA DEFENSA NACIONAL', $verde, true);
+        $this->texto($img, 330, 110, 24, 'CARTILLA DE IDENTIDAD', $tinta, true);
+        $this->texto($img, 340, 145, 16, 'SERVICIO MILITAR NACIONAL', $verde, true);
+
+        imagefilledrectangle($img, 60, 190, 290, 470, imagecolorallocate($img, 200, 196, 180));
+        $this->texto($img, 135, 340, 16, 'FOTO', $gris, true);
+
+        $x = 340;
+        $this->texto($img, $x, 210, 14, 'MATRICULA', $gris);
+        $this->texto($img, $x + 150, 210, 20, $p['matricula'] ?? '', $tinta, true);
+        $this->texto($img, $x, 260, 14, 'NOMBRE', $gris);
+        $this->texto($img, $x, 295, 20, $p['paterno'].' '.$p['materno'].' '.$p['nombres'], $tinta, true);
+        $this->texto($img, $x, 345, 14, 'CURP', $gris);
+        $this->texto($img, $x + 80, 345, 18, $p['curp'], $tinta, true);
+        $this->texto($img, $x, 395, 14, 'FECHA DE NACIMIENTO  '.$p['nacimiento'], $gris);
+        $this->texto($img, $x, 435, 14, 'CLASE '.substr($p['nacimiento'], -4).'   ·   JUNTA MUNICIPAL DE RECLUTAMIENTO '.$p['municipio'], $gris);
+
+        $this->leyendaFicticia($img);
+
+        return $img;
+    }
+
+    /**
+     * Simula una foto movida/desenfocada: reduce, vuelve a ampliar y
+     * desenfoca, hasta que la CURP (texto chico) deja de leerse pero el
+     * nombre (texto grande) todavía se alcanza a reconocer.
+     */
+    private function desenfocar(\GdImage $img, float $factor = 0.28): \GdImage
+    {
+        $w = imagesx($img);
+        $h = imagesy($img);
+        $pequena = imagescale($img, (int) ($w * $factor), (int) ($h * $factor), IMG_BILINEAR_FIXED);
+        $borrosa = imagescale($pequena, $w, $h, IMG_BILINEAR_FIXED);
+        imagedestroy($pequena);
+        imagedestroy($img);
+
+        for ($i = 0; $i < 3; $i++) {
+            imagefilter($borrosa, IMG_FILTER_GAUSSIAN_BLUR);
+        }
+
+        return $borrosa;
     }
 
     // ------------------------------------------------------------ Soporte

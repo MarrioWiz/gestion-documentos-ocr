@@ -47,7 +47,7 @@ class DocumentoOcrService
         'ACTA', 'CIVIL', 'ESTADOS', 'UNIDOS', 'MEXICANOS', 'CONSTANCIA', 'UNICA', 'ÚNICA', 'POBLACION',
         'POBLACIÓN', 'PRIMER', 'SEGUNDO', 'APELLIDO', 'APELLIDOS', 'NOMBRES', 'EJEMPLO', 'FICTICIO', 'VALIDEZ', 'OFICIAL',
         'PRESENTE', 'SECRETARIA', 'SECRETARÍA', 'GOBERNACION', 'GOBERNACIÓN', 'TRAMITE', 'TRÁMITE', 'GRATUITO',
-        'CERTIFICADA', 'VERIFICADA', 'ENTIDAD', 'RENAPO', 'TELCURP',
+        'CERTIFICADA', 'VERIFICADA', 'ENTIDAD', 'RENAPO', 'TELCURP', 'FOTO', 'PHOTO', 'MATRICULA', 'TIPO',
     ];
 
     // Etiquetas que marcan el fin del bloque del nombre.
@@ -188,6 +188,11 @@ class DocumentoOcrService
 
         $imagen = $this->corregirOrientacionExif($imagen, $ruta);
 
+        // La orientación se detecta sobre la imagen SIN ampliar ni contrastar:
+        // con esos ajustes el detector de Tesseract pierde mucha seguridad
+        // (en una INE de cabeza bajó de 2.9 a 0.2 y no la giraba).
+        $giroDetectado = $this->detectarGiro($this->guardarTemporal($imagen, false));
+
         // Las credenciales traen texto pequeño: se amplía la imagen (sin
         // pasarse, porque Tesseract se vuelve muy lento con imágenes enormes).
         $ancho = imagesx($imagen);
@@ -202,57 +207,66 @@ class DocumentoOcrService
         imagefilter($escalada, IMG_FILTER_GRAYSCALE);
         imagefilter($escalada, IMG_FILTER_CONTRAST, -40);
 
-        return $this->corregirGiro($escalada);
+        return $this->corregirGiro($escalada, $giroDetectado);
     }
 
+    // Palabras que aparecen en los documentos de identidad. Un texto leído
+    // de lado o de cabeza produce "palabras" inventadas, pero nunca estas.
+    private const PALABRAS_DE_DOCUMENTO = [
+        'ESTADOS', 'UNIDOS', 'MEXICANOS', 'MEXICO', 'NOMBRE', 'NOMBRES', 'FECHA', 'NACIMIENTO', 'CURP',
+        'CLAVE', 'REGISTRO', 'DOMICILIO', 'SEXO', 'NACIONAL', 'INSTITUTO', 'ELECTORAL', 'CREDENCIAL',
+        'VOTAR', 'ACTA', 'LICENCIA', 'CONDUCIR', 'PASAPORTE', 'PASSPORT', 'APELLIDO', 'APELLIDOS',
+        'NACIONALIDAD', 'LUGAR', 'ENTIDAD', 'MUNICIPIO', 'SECRETARIA', 'VIGENCIA', 'CARTILLA', 'MILITAR',
+        'ESTADO', 'DATE', 'BIRTH', 'SURNAME', 'GIVEN', 'NAMES', 'POBLACION', 'UNICA', 'CONSTANCIA',
+        'SECCION', 'ELECTOR', 'REGISTRADA', 'PERSONA', 'DATOS', 'CIVIL', 'MATRICULA', 'EXPEDICION',
+    ];
+
     /**
-     * Si la imagen está de lado o de cabeza, Tesseract devuelve basura.
-     * Primero se pregunta al detector de orientación de Tesseract (OSD); si
-     * no está seguro, se lee la imagen tal cual y, si casi no trae palabras
-     * reconocibles, se prueban los otros tres giros y gana el que lee más.
+     * Si la imagen está de lado o de cabeza, Tesseract devuelve basura. El
+     * detector de orientación (OSD) solo SUGIERE un giro: se lee la imagen
+     * derecha y con el giro sugerido y gana la que forme más palabras reales
+     * de documento (el OSD se equivoca a veces, p. ej. volteaba pasaportes
+     * derechos). Si ninguna lectura las forma, se prueban los otros giros.
      */
-    private function corregirGiro(\GdImage $imagen): string
+    private function corregirGiro(\GdImage $imagen, int $giroSugerido): string
     {
-        $ruta = $this->guardarTemporal($imagen, false);
-        $giro = $this->detectarGiro($ruta);
+        $mejor = null;
+        $probados = [];
 
-        if ($giro !== 0) {
-            // OSD dice cuántos grados girar en sentido horario;
-            // imagerotate gira en sentido antihorario.
-            $girada = imagerotate($imagen, 360 - $giro, imagecolorallocate($imagen, 255, 255, 255));
+        $probar = function (int $grados) use ($imagen, &$mejor, &$probados) {
+            $probados[] = $grados;
+            // OSD da grados en sentido horario; imagerotate gira al revés.
+            $copia = $grados === 0 ? null : imagerotate($imagen, 360 - $grados, imagecolorallocate($imagen, 255, 255, 255));
+            $ruta = $grados === 0 ? $this->guardarTemporal($imagen, false) : ($copia ? $this->guardarTemporal($copia) : null);
 
-            if ($girada !== false) {
-                imagedestroy($imagen);
-
-                return $this->guardarTemporal($girada);
+            if ($ruta === null) {
+                return;
             }
+
+            $puntaje = $this->puntajeLectura($this->ejecutarTesseract($ruta, 6));
+
+            if ($mejor === null || $puntaje > $mejor['puntaje']) {
+                $mejor = ['ruta' => $ruta, 'puntaje' => $puntaje];
+            }
+        };
+
+        $probar(0);
+        if ($giroSugerido !== 0) {
+            $probar($giroSugerido);
         }
 
-        $mejorRuta = $ruta;
-        $mejorPuntaje = $this->puntajeLectura($this->ejecutarTesseract($mejorRuta, 6));
-
-        foreach ([90, 270, 180] as $grados) {
-            if ($mejorPuntaje >= 8) {
+        foreach ([90, 180, 270] as $grados) {
+            if ($mejor['puntaje'][0] >= 2) {
                 break;
             }
-
-            $girada = imagerotate($imagen, $grados, imagecolorallocate($imagen, 255, 255, 255));
-
-            if ($girada === false) {
-                continue;
-            }
-
-            $rutaGirada = $this->guardarTemporal($girada);
-            $puntaje = $this->puntajeLectura($this->ejecutarTesseract($rutaGirada, 6));
-
-            if ($puntaje > $mejorPuntaje) {
-                [$mejorRuta, $mejorPuntaje] = [$rutaGirada, $puntaje];
+            if (! in_array($grados, $probados, true)) {
+                $probar($grados);
             }
         }
 
         imagedestroy($imagen);
 
-        return $mejorRuta;
+        return $mejor['ruta'];
     }
 
     /**
@@ -281,12 +295,17 @@ class DocumentoOcrService
     }
 
     /**
-     * Cuenta palabras "reales" (3+ letras seguidas): un texto de lado se
-     * reconoce como símbolos sueltos y casi no tiene ninguna.
+     * Calidad de una lectura: primero cuántas palabras de documento
+     * reconoce; a igualdad, cuántas palabras de 3+ letras lee.
+     *
+     * @return array{0: int, 1: int}
      */
-    private function puntajeLectura(string $texto): int
+    private function puntajeLectura(string $texto): array
     {
-        return (int) preg_match_all('/\b[A-ZÁÉÍÓÚÑa-záéíóúñ]{3,}\b/u', $texto);
+        preg_match_all('/[A-ZÁÉÍÓÚÑa-záéíóúñ]{3,}/u', $texto, $palabras);
+        $reconocidas = array_intersect(array_unique(array_map(fn (string $p) => Curp::sinAcentos($p), $palabras[0])), self::PALABRAS_DE_DOCUMENTO);
+
+        return [count($reconocidas), count($palabras[0])];
     }
 
     /**
