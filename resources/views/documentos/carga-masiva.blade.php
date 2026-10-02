@@ -153,21 +153,36 @@
         }
     }
 
-    async function procesarArchivos(archivos) {
+    // Una sola fila de espera para TODA la página: si se sueltan archivos
+    // mientras otros se procesan, se forman al final en vez de procesarse en
+    // paralelo. Así nunca se registran a la vez dos documentos de la misma
+    // persona nueva, y el OCR (que usa mucho CPU) no satura el servidor.
+    const cola = [];
+    let procesando = false;
+
+    function procesarArchivos(archivos) {
         tablaWrap.hidden = false;
-        const token = document.querySelector('meta[name="csrf-token"]').content;
-        const filas = Array.from(archivos).map(archivo => {
+        Array.from(archivos).forEach(archivo => {
             const fila = document.createElement('tr');
             fila.innerHTML = `
                 <td class="ps-4 small text-break">${escaparHtml(archivo.name)}</td>
                 <td><span class="text-muted small"><i class="bi bi-hourglass-split"></i> En cola</span></td>
                 <td>-</td><td>-</td><td class="pe-4"></td>`;
             tablaResultados.appendChild(fila);
-            return [archivo, fila];
+            cola.push([archivo, fila]);
         });
 
-        // Uno por uno: el OCR usa mucho CPU y así el servidor no se satura.
-        for (const [archivo, fila] of filas) {
+        if (!procesando) {
+            vaciarCola();
+        }
+    }
+
+    async function vaciarCola() {
+        procesando = true;
+        const token = document.querySelector('meta[name="csrf-token"]').content;
+
+        while (cola.length) {
+            const [archivo, fila] = cola.shift();
             const celdas = fila.querySelectorAll('td');
             celdas[1].innerHTML = '<span class="spinner-border spinner-border-sm text-info"></span> <span class="small">Analizando...</span>';
 
@@ -185,7 +200,11 @@
 
                 if (!respuesta.ok) {
                     data.status = 'revision';
-                    data.mensaje = data.message || 'El servidor rechazó el archivo.';
+                    // 422 = validación (formato/tamaño): ese mensaje sí es útil.
+                    // Cualquier otro error se muestra genérico, sin detalles técnicos.
+                    data.mensaje = respuesta.status === 422 && data.message
+                        ? data.message
+                        : 'No se pudo procesar el archivo. Intenta de nuevo.';
                 }
 
                 totales.total++;
@@ -200,6 +219,8 @@
                 celdas[4].innerHTML = '<span class="text-danger small">Error de conexión.</span>';
             }
         }
+
+        procesando = false;
     }
 </script>
 @endpush

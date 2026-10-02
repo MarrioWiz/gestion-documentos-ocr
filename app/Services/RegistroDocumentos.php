@@ -4,8 +4,10 @@ namespace App\Services;
 
 use App\Models\Documento;
 use App\Models\Persona;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 /**
@@ -72,7 +74,7 @@ class RegistroDocumentos
         }
 
         $notas = [];
-        $persona = Persona::where('curp', $ocr['curp'])->first();
+        $persona = $this->personaPorCurp($ocr['curp']);
 
         if (! $persona && ! $ocr['curp_verificada']) {
             $persona = $this->personaConCurpParecida($ocr['curp'], $ocr['nombre_completo'] ?? null);
@@ -86,37 +88,54 @@ class RegistroDocumentos
             $notas[] = "La CURP se leyó como {$ocr['curp']} (un carácter distinto); se asoció a {$persona->curp}.";
         }
 
-        if ($persona && $persona->documentos()->where('tipo_documento', $ocr['tipo_documento'])->exists()) {
-            return $base + [
-                'status' => 'omitido',
-                'mensaje' => 'Esta persona ya tiene '.Persona::etiquetaTipo($ocr['tipo_documento']).'; no se modificó.',
-                'curp' => $persona->curp,
-                'persona_id' => $persona->id,
-                'persona_nombre' => $persona->nombre_completo,
-                'tipo_documento' => $ocr['tipo_documento'],
-            ];
+        $yaLoTenia = fn (Persona $p) => $base + [
+            'status' => 'omitido',
+            'mensaje' => 'Esta persona ya tiene '.Persona::etiquetaTipo($ocr['tipo_documento']).'; no se modificó.',
+            'curp' => $p->curp,
+            'persona_id' => $p->id,
+            'persona_nombre' => $p->nombre_completo,
+            'tipo_documento' => $ocr['tipo_documento'],
+        ];
+
+        if ($persona && $this->yaTieneTipo($persona, $ocr['tipo_documento'])) {
+            return $yaLoTenia($persona);
         }
 
-        $esNueva = ! $persona;
+        $esNueva = false;
+        $curpPersona = $persona->curp ?? $ocr['curp'];
 
-        $documento = DB::transaction(function () use (&$persona, &$notas, $archivo, $ocr, $hash) {
-            if (! $persona) {
-                $persona = Persona::create([
-                    'curp' => $ocr['curp'],
-                    'nombre_completo' => $ocr['nombre_completo'] ?? Persona::NOMBRE_PENDIENTE,
-                    'fecha_nacimiento' => $ocr['fecha_nacimiento'] ?? null,
-                    'entidad_nacimiento' => $ocr['entidad_nacimiento'] ?? null,
-                ]);
-            } elseif ($completados = $persona->completarDatosFaltantes($ocr)) {
-                $notas[] = 'Se completó: '.implode(', ', $completados).'.';
-            }
+        try {
+            $documento = DB::transaction(function () use (&$persona, &$notas, &$esNueva, $archivo, $ocr, $hash) {
+                if (! $persona) {
+                    // createOrFirst y no create: si se suben a la vez dos
+                    // documentos de la misma persona nueva (p. ej. su CURP y su
+                    // acta), el que llega segundo usa a la persona que creó el
+                    // primero en lugar de chocar con la CURP única.
+                    $persona = Persona::createOrFirst(['curp' => $ocr['curp']], [
+                        'nombre_completo' => $ocr['nombre_completo'] ?? Persona::NOMBRE_PENDIENTE,
+                        'fecha_nacimiento' => $ocr['fecha_nacimiento'] ?? null,
+                        'entidad_nacimiento' => $ocr['entidad_nacimiento'] ?? null,
+                    ]);
+                    $esNueva = $persona->wasRecentlyCreated;
+                }
 
-            return $this->guardar($persona, $archivo, [
-                'tipo_documento' => $ocr['tipo_documento'],
-                'numero_documento' => $ocr['numero_documento'] ?? null,
-                'texto_extraido' => $ocr['texto'] ?? null,
-            ], $hash);
-        });
+                if (! $esNueva && $completados = $persona->completarDatosFaltantes($ocr)) {
+                    $notas[] = 'Se completó: '.implode(', ', $completados).'.';
+                }
+
+                return $this->guardar($persona, $archivo, [
+                    'tipo_documento' => $ocr['tipo_documento'],
+                    'numero_documento' => $ocr['numero_documento'] ?? null,
+                    'texto_extraido' => $ocr['texto'] ?? null,
+                ], $hash);
+            });
+        } catch (UniqueConstraintViolationException $e) {
+            // Otra carga simultánea guardó ese mismo tipo de documento para
+            // esta persona entre nuestra revisión y el guardado.
+            $existente = Persona::where('curp', $curpPersona)->first();
+
+            return $existente ? $yaLoTenia($existente) : $revision + ['mensaje' => 'Otro archivo de esta persona se estaba guardando al mismo tiempo. Vuelve a subir este.'];
+        }
 
         $persona->load('documentos');
         $etiqueta = Persona::etiquetaTipo($documento->tipo_documento);
@@ -147,16 +166,33 @@ class RegistroDocumentos
         $extension = strtolower($archivo->getClientOriginalExtension()) ?: 'bin';
         $ruta = $archivo->storeAs("documentos/{$persona->id}", Str::uuid().'.'.$extension, Documento::DISCO);
 
-        return Documento::create([
-            'persona_id' => $persona->id,
-            'tipo_documento' => $datos['tipo_documento'],
-            'numero_documento' => $datos['numero_documento'] ?? null,
-            'ruta_archivo' => $ruta,
-            'nombre_original' => $archivo->getClientOriginalName(),
-            'archivo_hash' => $hash ?? hash_file('sha256', $archivo->getRealPath()),
-            'texto_extraido' => $datos['texto_extraido'] ?? null,
-            'subido_por' => auth()->id(),
-        ]);
+        try {
+            return Documento::create([
+                'persona_id' => $persona->id,
+                'tipo_documento' => $datos['tipo_documento'],
+                'numero_documento' => $datos['numero_documento'] ?? null,
+                'ruta_archivo' => $ruta,
+                'nombre_original' => $archivo->getClientOriginalName(),
+                'archivo_hash' => $hash ?? hash_file('sha256', $archivo->getRealPath()),
+                'texto_extraido' => $datos['texto_extraido'] ?? null,
+                'subido_por' => auth()->id(),
+            ]);
+        } catch (\Throwable $e) {
+            // Sin registro en la base no debe quedar un archivo huérfano.
+            Storage::disk(Documento::DISCO)->delete($ruta);
+
+            throw $e;
+        }
+    }
+
+    protected function personaPorCurp(string $curp): ?Persona
+    {
+        return Persona::where('curp', $curp)->first();
+    }
+
+    protected function yaTieneTipo(Persona $persona, string $tipo): bool
+    {
+        return $persona->documentos()->where('tipo_documento', $tipo)->exists();
     }
 
     public function archivoRepetido(UploadedFile $archivo): ?Documento

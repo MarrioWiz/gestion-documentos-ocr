@@ -108,7 +108,22 @@ class DocumentoController extends Controller
             ]);
         }
 
-        return response()->json($this->registro->registrarAutomatico($archivo, $resultado));
+        try {
+            return response()->json($this->registro->registrarAutomatico($archivo, $resultado));
+        } catch (\Throwable $e) {
+            // El detalle técnico queda en el log; al usuario nunca se le
+            // muestra un error de base de datos.
+            report($e);
+
+            return response()->json([
+                'status' => 'revision',
+                'archivo' => $archivo->getClientOriginalName(),
+                'curp' => $resultado['curp'] ?? null,
+                'nombre_completo' => $resultado['nombre_completo'] ?? null,
+                'tipo_documento' => $resultado['tipo_documento'] ?? null,
+                'mensaje' => 'No se pudo guardar este archivo. Intenta subirlo de nuevo o complétalo manualmente.',
+            ]);
+        }
     }
 
     public function store(StoreDocumentoRequest $request): RedirectResponse

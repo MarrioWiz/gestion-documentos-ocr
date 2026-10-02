@@ -7,6 +7,7 @@ use App\Models\HistorialAcceso;
 use App\Models\Persona;
 use App\Models\User;
 use App\Services\DocumentoOcrService;
+use App\Services\RegistroDocumentos;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -158,6 +159,43 @@ class CargaMasivaTest extends TestCase
 
         $this->subir('acta.jpg', $this->lectura('acta_nacimiento', ['curp' => null, 'curp_verificada' => false, 'nombre_completo' => 'CARLOS DANIEL MENDOZA RUIZ']))
             ->assertJson(['status' => 'revision', 'sugerencia_persona_id' => $persona->id, 'curp' => self::CURP_CARLOS]);
+    }
+
+    /**
+     * Error real: se subieron a la vez la CURP y el acta de una persona
+     * nueva. Cuando la carga de la CURP revisó, la persona aún no existía;
+     * cuando fue a crearla, la carga del acta ya la había registrado.
+     */
+    public function test_si_otra_carga_crea_a_la_misma_persona_al_mismo_tiempo_se_reutiliza(): void
+    {
+        $persona = Persona::create(['curp' => self::CURP_CARLOS, 'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL']);
+        $this->partialMock(RegistroDocumentos::class, function ($mock) {
+            $mock->shouldAllowMockingProtectedMethods()->shouldReceive('personaPorCurp')->once()->andReturnNull();
+        });
+
+        $this->subir('curp.pdf', $this->lectura('curp'))
+            ->assertOk()
+            ->assertJson(['status' => 'guardado', 'persona_nueva' => false, 'persona_id' => $persona->id]);
+
+        $this->assertSame(1, Persona::count());
+        $this->assertSame(['curp'], $persona->documentos()->pluck('tipo_documento')->all());
+    }
+
+    public function test_si_otra_carga_guarda_el_mismo_documento_al_mismo_tiempo_se_omite_sin_error(): void
+    {
+        $persona = Persona::create(['curp' => self::CURP_CARLOS, 'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL']);
+        Documento::create(['persona_id' => $persona->id, 'tipo_documento' => 'acta_nacimiento', 'ruta_archivo' => 'documentos/otra-carga.jpg']);
+        $this->partialMock(RegistroDocumentos::class, function ($mock) {
+            $mock->shouldAllowMockingProtectedMethods()->shouldReceive('yaTieneTipo')->once()->andReturnFalse();
+        });
+
+        $this->subir('acta.jpg', $this->lectura('acta_nacimiento'))
+            ->assertOk()
+            ->assertJson(['status' => 'omitido', 'persona_id' => $persona->id]);
+
+        $this->assertSame(1, Documento::count());
+        // El archivo de la carga que perdió no se queda huérfano en el disco.
+        $this->assertSame([], Storage::disk('local')->allFiles("documentos/{$persona->id}"));
     }
 
     public function test_varias_personas_en_una_sola_carga(): void
