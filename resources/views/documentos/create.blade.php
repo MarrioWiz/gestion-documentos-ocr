@@ -282,6 +282,13 @@
                 return;
             }
 
+            // Si el formulario ya tenía la CURP de alguien (p. ej. se llegó
+            // desde "Agregar documento" de un expediente) y el archivo es de
+            // otra persona, se avisa y el formulario pasa a la persona dueña
+            // del documento: nunca se mezcla un documento en otro expediente.
+            const curpAntes = document.querySelector('[name="curp"]').value.trim().toUpperCase();
+            const esDeOtraPersona = data.curp && curpAntes.length === 18 && curpAntes !== data.curp;
+
             const campos = [
                 ['curp', data.curp],
                 ['nombre_completo', data.nombre_completo],
@@ -308,7 +315,15 @@
                 ocrTextoCrudo.hidden = true;
             }
 
-            if (data.persona_existente) {
+            if (esDeOtraPersona) {
+                avisoPersona.className = 'small mt-3 p-3 rounded-3 badge-faltante';
+                avisoPersona.innerHTML = `<i class="bi bi-person-exclamation"></i> <strong>Este documento es de otra persona.</strong>
+                    <div class="mt-1">Tenías la CURP <span class="font-monospace">${escaparHtml(curpAntes)}</span>, pero el documento es de
+                    <strong>${escaparHtml(data.persona_existente ? data.persona_existente.nombre : (data.nombre_completo || 'otra persona'))}</strong>
+                    (<span class="font-monospace">${escaparHtml(data.curp)}</span>).</div>
+                    <div class="mt-1">Cambié el formulario a su dueño; si guardas, se agregará a <strong>su</strong> expediente.</div>`;
+                avisoPersona.hidden = false;
+            } else if (data.persona_existente) {
                 const p = data.persona_existente;
                 avisoPersona.className = 'small mt-3 p-3 rounded-3 ' + (p.ya_tiene_tipo ? 'badge-aviso' : 'badge-info');
                 avisoPersona.innerHTML = p.ya_tiene_tipo

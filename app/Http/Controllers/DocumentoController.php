@@ -12,6 +12,8 @@ use App\Services\RegistroDocumentos;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
@@ -42,11 +44,9 @@ class DocumentoController extends Controller
         // Una foto difícil puede requerir varias pasadas de OCR.
         set_time_limit(180);
 
-        try {
-            $resultado = $this->ocr->extraer($request->file('archivo')->getRealPath());
-        } catch (\Throwable $e) {
-            report($e);
+        $resultado = $this->leerArchivo($request->file('archivo'));
 
+        if ($resultado === null) {
             return response()->json([
                 'ok' => false,
                 'mensaje' => 'No se pudo procesar el archivo con OCR. Llena los datos manualmente.',
@@ -137,6 +137,17 @@ class DocumentoController extends Controller
                 ->with('warning', 'Este mismo archivo ya está cargado como '.Persona::etiquetaTipo($repetido->tipo_documento).' de '.$repetido->persona->nombre_completo.'.');
         }
 
+        // No se confía solo en lo que dice el formulario: se vuelve a leer el
+        // archivo (rápido, porque la lectura de "Extraer datos" quedó en
+        // caché) y se bloquea si el documento es de otra persona o de otro tipo.
+        set_time_limit(180);
+        if ($problema = $this->documentoNoCorresponde($datos, $this->leerArchivo($request->file('archivo')))) {
+            return redirect()
+                ->route('documentos.create')
+                ->withInput()
+                ->with('warning', $problema);
+        }
+
         $persona = Persona::firstOrNew(['curp' => $datos['curp']]);
         $esNueva = ! $persona->exists;
         $nombreDistinto = false;
@@ -202,6 +213,61 @@ class DocumentoController extends Controller
         return redirect()
             ->route('personas.show', $persona)
             ->with('success', $mensaje);
+    }
+
+    /**
+     * OCR del archivo, guardado en caché por su huella SHA-256: si el mismo
+     * archivo se lee al pulsar "Extraer datos" y otra vez al guardar, el
+     * segundo análisis es instantáneo. Devuelve null si el OCR falló.
+     */
+    private function leerArchivo(UploadedFile $archivo): ?array
+    {
+        try {
+            return Cache::remember(
+                'ocr:'.hash_file('sha256', $archivo->getRealPath()),
+                now()->addHours(2),
+                fn () => $this->ocr->extraer($archivo->getRealPath())
+            );
+        } catch (\Throwable $e) {
+            report($e);
+
+            return null;
+        }
+    }
+
+    /**
+     * Compara lo que se capturó en el formulario con lo que realmente dice
+     * el archivo. Devuelve el motivo para no guardarlo, o null si cuadra (o
+     * si el OCR no pudo leer lo suficiente para decidir).
+     *
+     * @param  array{curp: string, tipo_documento: string}  $datos
+     */
+    private function documentoNoCorresponde(array $datos, ?array $lectura): ?string
+    {
+        if ($lectura === null || ! empty($lectura['error'])) {
+            return null;
+        }
+
+        $curpDocumento = $lectura['curp'] ?? null;
+
+        // Una CURP que no pasa el verificador y difiere en un solo carácter
+        // es casi seguro un error de lectura del OCR, no otra persona.
+        $esErrorDeLectura = $curpDocumento !== null && ! $lectura['curp_verificada'] && levenshtein($curpDocumento, $datos['curp']) <= 1;
+
+        if ($curpDocumento !== null && $curpDocumento !== $datos['curp'] && ! $esErrorDeLectura) {
+            $dueno = Persona::where('curp', $curpDocumento)->first();
+            $deQuien = $dueno ? "{$dueno->nombre_completo} (CURP {$curpDocumento})" : "otra persona (CURP {$curpDocumento})";
+
+            return "Este documento es de {$deQuien}, no de la CURP {$datos['curp']} que está en el formulario. No se guardó: súbelo al expediente de su dueño.";
+        }
+
+        $tipoDocumento = $lectura['tipo_documento'] ?? null;
+
+        if ($tipoDocumento !== null && $tipoDocumento !== $datos['tipo_documento'] && ($lectura['puntaje_tipo'] ?? 0) >= 0.6) {
+            return 'El archivo es '.Persona::etiquetaTipo($tipoDocumento).', pero lo marcaste como '.Persona::etiquetaTipo($datos['tipo_documento']).'. Corrige el tipo de documento antes de guardar.';
+        }
+
+        return null;
     }
 
     public function confirmarReemplazo(Request $request): RedirectResponse

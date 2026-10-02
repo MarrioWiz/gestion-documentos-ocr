@@ -209,6 +209,55 @@ class CargaMasivaTest extends TestCase
         $this->assertSame(2, Persona::count());
     }
 
+    public function test_la_subida_individual_no_deja_meter_el_documento_de_otra_persona(): void
+    {
+        $carlos = Persona::create(['curp' => self::CURP_CARLOS, 'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL']);
+        Persona::create(['curp' => 'LOGF951103MJCPRR08', 'nombre_completo' => 'LOPEZ GARCIA MARIA FERNANDA']);
+        // El archivo es el acta de María, pero el formulario dice Carlos.
+        $this->lecturas[] = $this->lectura('acta_nacimiento', ['curp' => 'LOGF951103MJCPRR08', 'nombre_completo' => 'LOPEZ GARCIA MARIA FERNANDA']);
+
+        $this->post(route('documentos.store'), [
+            'curp' => self::CURP_CARLOS,
+            'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL',
+            'tipo_documento' => 'acta_nacimiento',
+            'archivo' => UploadedFile::fake()->createWithContent('acta_maria.jpg', random_bytes(64)),
+        ])
+            ->assertRedirect(route('documentos.create'))
+            ->assertSessionHas('warning', fn (string $m) => str_contains($m, 'LOPEZ GARCIA MARIA FERNANDA') && str_contains($m, 'No se guardó'));
+
+        $this->assertSame(0, Documento::count());
+        $this->assertSame(0, $carlos->documentos()->count());
+    }
+
+    public function test_la_subida_individual_no_deja_guardar_un_documento_con_otro_tipo(): void
+    {
+        $this->lecturas[] = $this->lectura('ine', ['puntaje_tipo' => 2.0]);
+
+        $this->post(route('documentos.store'), [
+            'curp' => self::CURP_CARLOS,
+            'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL',
+            'tipo_documento' => 'acta_nacimiento',
+            'archivo' => UploadedFile::fake()->createWithContent('ine.png', random_bytes(64)),
+        ])->assertSessionHas('warning', fn (string $m) => str_contains($m, 'El archivo es INE'));
+
+        $this->assertSame(0, Documento::count());
+    }
+
+    public function test_la_subida_individual_tolera_un_error_de_un_caracter_del_ocr_en_la_curp(): void
+    {
+        $persona = Persona::create(['curp' => self::CURP_CARLOS, 'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL']);
+        $this->lecturas[] = $this->lectura('acta_nacimiento', ['curp' => 'MERC010722HPLNZRA4', 'curp_verificada' => false]);
+
+        $this->post(route('documentos.store'), [
+            'curp' => self::CURP_CARLOS,
+            'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL',
+            'tipo_documento' => 'acta_nacimiento',
+            'archivo' => UploadedFile::fake()->createWithContent('acta.jpg', random_bytes(64)),
+        ])->assertRedirect(route('personas.show', $persona));
+
+        $this->assertSame(1, $persona->documentos()->count());
+    }
+
     public function test_la_subida_individual_agrega_el_acta_al_expediente_existente(): void
     {
         $persona = Persona::create(['curp' => self::CURP_CARLOS, 'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL']);
