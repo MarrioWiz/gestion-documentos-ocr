@@ -235,18 +235,82 @@ class Curp
         return null;
     }
 
-    /**
-     * Las 4 primeras letras de la CURP salen del nombre: inicial del primer
-     * apellido, su primera vocal interna, inicial del segundo apellido e
-     * inicial del nombre. Se usa para verificar/ordenar el nombre leído.
-     */
-    public static function coincideConNombre(string $curp, string $paterno, string $materno, string $nombre): bool
-    {
-        $inicial = fn (string $palabra) => substr(self::sinAcentos($palabra), 0, 1);
+    // Mínimo de letras (de 7) que deben cuadrar para aceptar un nombre. Se
+    // tolera una diferencia porque RENAPO cambia letras en casos especiales
+    // (palabras altisonantes, nombres compuestos) y el OCR puede fallar una.
+    public const COINCIDENCIAS_MINIMAS_NOMBRE = 6;
 
-        return $inicial($paterno) === $curp[0]
-            && ($materno === '' ? $curp[2] === 'X' : $inicial($materno) === $curp[2])
-            && $inicial(self::nombreDePila($nombre)) === $curp[3];
+    // Partículas que RENAPO ignora en apellidos y nombres compuestos.
+    private const PARTICULAS = ['DA', 'DAS', 'DE', 'DEL', 'DER', 'DI', 'DIE', 'DD', 'EL', 'LA', 'LAS', 'LE', 'LES', 'LOS', 'MAC', 'MC', 'VAN', 'VON', 'Y'];
+
+    /**
+     * Siete letras de la CURP salen del nombre:
+     *  1 inicial del primer apellido      2 su primera vocal interna
+     *  3 inicial del segundo apellido     4 inicial del nombre
+     *  14-16 primera consonante interna del primer apellido, del segundo
+     *  apellido y del nombre.
+     * Devuelve cuántas de esas 7 coinciden con el nombre dado.
+     */
+    public static function puntajeNombre(string $curp, string $paterno, string $materno, string $nombres): int
+    {
+        if (strlen($curp) < 16) {
+            return 0;
+        }
+
+        $paterno = self::palabraPrincipal($paterno);
+        $materno = self::palabraPrincipal($materno);
+        $nombre = self::palabraPrincipal(self::nombreDePila($nombres));
+
+        if ($paterno === '' || $nombre === '') {
+            return 0;
+        }
+
+        $comparaciones = [
+            [$curp[0], $paterno[0]],
+            [$curp[1], self::primeraInterna($paterno, true)],
+            [$curp[2], $materno === '' ? 'X' : $materno[0]],
+            [$curp[3], $nombre[0]],
+            [$curp[13], self::primeraInterna($paterno, false)],
+            [$curp[14], $materno === '' ? 'X' : self::primeraInterna($materno, false)],
+            [$curp[15], self::primeraInterna($nombre, false)],
+        ];
+
+        return count(array_filter($comparaciones, fn (array $par) => $par[0] === $par[1]));
+    }
+
+    public static function coincideConNombre(string $curp, string $paterno, string $materno, string $nombres): bool
+    {
+        return self::puntajeNombre($curp, $paterno, $materno, $nombres) >= self::COINCIDENCIAS_MINIMAS_NOMBRE;
+    }
+
+    /**
+     * "DE LA CRUZ" → "CRUZ": las partículas no cuentan para la CURP.
+     */
+    private static function palabraPrincipal(string $texto): string
+    {
+        foreach (preg_split('/\s+/', trim(self::sinAcentos($texto))) as $palabra) {
+            $palabra = preg_replace('/[^A-Z]/', '', $palabra);
+
+            if ($palabra !== '' && ! in_array($palabra, self::PARTICULAS, true)) {
+                return $palabra;
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Primera vocal (o consonante) después de la primera letra; "X" si no hay.
+     */
+    private static function primeraInterna(string $palabra, bool $vocal): string
+    {
+        for ($i = 1; $i < strlen($palabra); $i++) {
+            if (str_contains('AEIOU', $palabra[$i]) === $vocal) {
+                return $palabra[$i];
+            }
+        }
+
+        return 'X';
     }
 
     /**

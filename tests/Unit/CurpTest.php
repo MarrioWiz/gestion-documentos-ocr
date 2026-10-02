@@ -71,4 +71,14 @@ class CurpTest extends TestCase
         $this->assertTrue(Curp::coincideConNombre('LOGF951103MJCPRR08', 'LOPEZ', 'GARCIA', 'MARIA FERNANDA'));
         $this->assertFalse(Curp::coincideConNombre('MERC010722HPLNZRA3', 'RUIZ', 'MENDOZA', 'CARLOS'));
     }
+
+    public function test_el_nombre_debe_cuadrar_tambien_en_las_consonantes_internas(): void
+    {
+        // Las 7 letras: M-E-R-C (iniciales y vocal) + N-Z-R (consonantes internas).
+        $this->assertSame(7, Curp::puntajeNombre('MERC010722HPLNZRA3', 'MENDOZA', 'RUIZ', 'CARLOS DANIEL'));
+        // El padre comparte apellido paterno pero no cuadra.
+        $this->assertLessThan(Curp::COINCIDENCIAS_MINIMAS_NOMBRE, Curp::puntajeNombre('MERC010722HPLNZRA3', 'MENDOZA', 'PEREZ', 'JOSE LUIS'));
+        // Partículas: "DE LA CRUZ" cuenta como "CRUZ".
+        $this->assertSame(7, Curp::puntajeNombre('CUSA900101HDFRNN00', 'DE LA CRUZ', 'SANCHEZ', 'ANTONIO'));
+    }
 }

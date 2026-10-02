@@ -90,6 +90,64 @@ class AnalisisTextoTest extends TestCase
         $this->assertSame('MENDOZA RUIZ CARLOS DANIEL', $r['nombre_completo']);
     }
 
+    /**
+     * Caso real: en la constancia descargada de gob.mx el texto sale
+     * desordenado (la etiqueta "Nombre" queda DESPUÉS del nombre) y arriba
+     * viene la firma de la Secretaria de Gobernación. El nombre correcto se
+     * elige porque es el único que cuadra con las letras de la CURP.
+     */
+    public function test_elige_el_nombre_que_cuadra_con_la_curp_y_no_la_firma_de_la_secretaria(): void
+    {
+        $texto = <<<'TXT'
+            PRESENTE
+            El derecho a la identidad está consagrado en nuestra Constitución.
+            Agradezco tu participación.
+            ROSA ICELA RODRÍGUEZ VELÁZQUEZ
+            SECRETARIA DE GOBERNACIÓN
+            Base de Datos Nacional de la Clave Única de Registro de Población (RENAPO)
+            CARLOS DANIEL MENDOZA RUIZ
+            130039200504058
+            MERC010722HPLNZRA3
+            CARLOS DANIEL MENDOZA RUIZ
+            Clave:
+            Nombre
+            CURP Certificada: verificada con el Registro Civil
+            PUEBLA
+            Entidad de registro:
+            TXT;
+
+        $r = $this->servicio->analizarTexto($texto);
+
+        $this->assertSame('curp', $r['tipo_documento']);
+        $this->assertSame('MENDOZA RUIZ CARLOS DANIEL', $r['nombre_completo']);
+    }
+
+    public function test_nombre_partido_en_renglones_antes_de_sus_etiquetas(): void
+    {
+        $texto = <<<'TXT'
+            Estados Unidos Mexicanos
+            Acta de Nacimiento
+            Datos de la Persona Registrada
+            MARIA FERNANDA
+            LOPEZ
+            GARCIA
+            Nombre(s):
+            Primer Apellido:
+            Segundo Apellido:
+            Clave Única de Registro de Población
+            LOGF951103MJCPRR08
+            Datos de Filiación de la Persona Registrada
+            ALBERTO LOPEZ DIAZ
+            SOFIA GARCIA NAVA
+            TXT;
+
+        $r = $this->servicio->analizarTexto($texto);
+
+        $this->assertSame('acta_nacimiento', $r['tipo_documento']);
+        // No confunde a la persona con sus padres (mismos apellidos).
+        $this->assertSame('LOPEZ GARCIA MARIA FERNANDA', $r['nombre_completo']);
+    }
+
     public function test_texto_sin_firmas_conocidas_no_se_clasifica(): void
     {
         $r = $this->servicio->analizarTexto("LISTA DEL SUPERMERCADO\nLECHE\nPAN");

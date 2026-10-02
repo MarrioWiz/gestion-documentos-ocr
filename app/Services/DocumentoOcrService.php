@@ -46,6 +46,8 @@ class DocumentoOcrService
         'MUESTRA', 'SAMPLE', 'EXTRANJERO', 'ABROAD', 'UNITED', 'STATES', 'NOMBRE', 'NAME', 'EDAD',
         'ACTA', 'CIVIL', 'ESTADOS', 'UNIDOS', 'MEXICANOS', 'CONSTANCIA', 'UNICA', 'ÚNICA', 'POBLACION',
         'POBLACIÓN', 'PRIMER', 'SEGUNDO', 'APELLIDO', 'APELLIDOS', 'NOMBRES', 'EJEMPLO', 'FICTICIO', 'VALIDEZ', 'OFICIAL',
+        'PRESENTE', 'SECRETARIA', 'SECRETARÍA', 'GOBERNACION', 'GOBERNACIÓN', 'TRAMITE', 'TRÁMITE', 'GRATUITO',
+        'CERTIFICADA', 'VERIFICADA', 'ENTIDAD', 'RENAPO', 'TELCURP',
     ];
 
     // Etiquetas que marcan el fin del bloque del nombre.
@@ -596,6 +598,14 @@ class DocumentoOcrService
     private function extraerNombre(string $texto, ?string $curp): ?array
     {
         $lineas = preg_split('/\r\n|\r|\n/', $texto);
+
+        // Lo más confiable: el nombre que cuadra letra por letra con la CURP,
+        // esté donde esté en el documento (sin depender de etiquetas, que en
+        // algunos PDF salen desordenadas o pertenecen a otra persona).
+        if ($curp !== null && ($porCurp = $this->nombrePorCurp($lineas, $curp)) !== null) {
+            return ['valor' => $porCurp, 'prioridad' => 4];
+        }
+
         $porEtiqueta = $this->extraerNombrePorEtiqueta($lineas);
 
         if ($porEtiqueta !== null) {
@@ -607,6 +617,141 @@ class DocumentoOcrService
         $heuristico = $this->extraerNombrePorHeuristica($lineas);
 
         return $heuristico !== null ? ['valor' => $heuristico, 'prioridad' => 1] : null;
+    }
+
+    /**
+     * Busca en todo el texto una secuencia de palabras en mayúsculas que
+     * cuadre con las 7 letras del nombre codificadas en la CURP (ver
+     * Curp::puntajeNombre), en orden "apellidos nombre(s)" (INE) o
+     * "nombre(s) apellidos" (acta, constancia). Revisa cada renglón y
+     * también 2-3 renglones juntos, porque la INE parte el nombre en varios.
+     * Devuelve el nombre en orden "PATERNO MATERNO NOMBRE(S)".
+     *
+     * @param  string[]  $lineas
+     */
+    private function nombrePorCurp(array $lineas, string $curp): ?string
+    {
+        $lineas = array_values(array_filter(array_map('trim', $lineas), fn (string $l) => $l !== ''));
+        $mejor = null;
+
+        foreach (array_keys($lineas) as $i) {
+            for ($ventana = 1; $ventana <= 3 && $i + $ventana <= count($lineas); $ventana++) {
+                $bloque = implode(' ', array_slice($lineas, $i, $ventana));
+
+                foreach ($this->segmentosDeNombre($bloque) as $unidades) {
+                    $candidato = $this->mejorAcomodoConCurp($unidades, $curp);
+
+                    if ($candidato !== null && ($mejor === null || [$candidato['puntaje'], $candidato['palabras']] > [$mejor['puntaje'], $mejor['palabras']])) {
+                        $mejor = $candidato;
+                    }
+                }
+            }
+        }
+
+        return $mejor['valor'] ?? null;
+    }
+
+    /**
+     * Parte un texto en tramos de palabras que podrían ser un nombre: solo
+     * palabras en MAYÚSCULAS y que no sean etiquetas conocidas; cualquier
+     * otra cosa (números, minúsculas, "CURP", "SECRETARIA"...) corta el
+     * tramo. Las partículas ("DE LA", "DEL") se pegan a la palabra que sigue
+     * para formar un solo apellido ("DE LA CRUZ").
+     *
+     * @return array<int, string[]>
+     */
+    private function segmentosDeNombre(string $texto): array
+    {
+        $segmentos = [];
+        $actual = [];
+        $particulas = '';
+
+        foreach (preg_split('/\s+/u', $texto) as $token) {
+            $palabra = trim($token, ".,;:()\"'");
+            $esNombre = preg_match('/^[A-ZÁÉÍÓÚÜÑ]+$/u', $palabra) && mb_strlen($palabra) >= 1
+                && ! in_array(Curp::sinAcentos($palabra), array_map([Curp::class, 'sinAcentos'], self::RUIDO_NOMBRE), true);
+
+            if (! $esNombre) {
+                if (count($actual) >= 2) {
+                    $segmentos[] = $actual;
+                }
+                $actual = [];
+                $particulas = '';
+
+                continue;
+            }
+
+            if (in_array(Curp::sinAcentos($palabra), ['DE', 'DEL', 'LA', 'LAS', 'LOS', 'Y', 'MC', 'VAN', 'VON'], true)) {
+                $particulas .= $palabra.' ';
+
+                continue;
+            }
+
+            if (mb_strlen($palabra) < 2) {
+                continue;
+            }
+
+            $actual[] = $particulas.$palabra;
+            $particulas = '';
+        }
+
+        if (count($actual) >= 2) {
+            $segmentos[] = $actual;
+        }
+
+        return $segmentos;
+    }
+
+    /**
+     * Prueba cada sub-secuencia de 2 a 5 palabras en los dos órdenes
+     * posibles y se queda con la que más letras comparte con la CURP (y, a
+     * igualdad, la más larga: así no se pierde un segundo nombre).
+     *
+     * @param  string[]  $unidades
+     * @return array{valor: string, puntaje: int, palabras: int}|null
+     */
+    private function mejorAcomodoConCurp(array $unidades, string $curp): ?array
+    {
+        $mejor = null;
+        $total = count($unidades);
+        // Sin segundo apellido la CURP lleva "X" en la posición 3.
+        $minimo = $curp[2] === 'X' ? 2 : 3;
+
+        for ($inicio = 0; $inicio < $total; $inicio++) {
+            for ($largo = $minimo; $largo <= 5 && $inicio + $largo <= $total; $largo++) {
+                $sub = array_slice($unidades, $inicio, $largo);
+                $acomodos = [];
+
+                // Apellidos primero (INE): PATERNO MATERNO NOMBRE(S)
+                $acomodos[] = [$sub[0], $sub[1], implode(' ', array_slice($sub, 2))];
+                // Nombre(s) primero (acta, constancia): NOMBRE(S) PATERNO MATERNO
+                $acomodos[] = [$sub[$largo - 2], $sub[$largo - 1], implode(' ', array_slice($sub, 0, $largo - 2))];
+
+                if ($minimo === 2) {
+                    // Un solo apellido: PATERNO NOMBRE(S) o NOMBRE(S) PATERNO.
+                    $acomodos[] = [$sub[0], '', implode(' ', array_slice($sub, 1))];
+                    $acomodos[] = [$sub[$largo - 1], '', implode(' ', array_slice($sub, 0, $largo - 1))];
+                }
+
+                foreach ($acomodos as [$paterno, $materno, $nombres]) {
+                    if ($nombres === '') {
+                        continue;
+                    }
+
+                    $puntaje = Curp::puntajeNombre($curp, $paterno, $materno, $nombres);
+
+                    if ($puntaje >= Curp::COINCIDENCIAS_MINIMAS_NOMBRE && ($mejor === null || [$puntaje, $largo] > [$mejor['puntaje'], $mejor['palabras']])) {
+                        $mejor = [
+                            'valor' => mb_strtoupper(trim(preg_replace('/\s+/', ' ', "{$paterno} {$materno} {$nombres}"))),
+                            'puntaje' => $puntaje,
+                            'palabras' => $largo,
+                        ];
+                    }
+                }
+            }
+        }
+
+        return $mejor;
     }
 
     /**
