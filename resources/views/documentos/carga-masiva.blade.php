@@ -182,7 +182,7 @@
         const token = document.querySelector('meta[name="csrf-token"]').content;
 
         while (cola.length) {
-            const [archivo, fila] = cola.shift();
+            const [archivo, fila, esReintento] = cola.shift();
             const celdas = fila.querySelectorAll('td');
             celdas[1].innerHTML = '<span class="spinner-border spinner-border-sm text-info"></span> <span class="small">Analizando...</span>';
 
@@ -205,6 +205,16 @@
                     data.mensaje = respuesta.status === 422 && data.message
                         ? data.message
                         : 'No se pudo procesar el archivo. Intenta de nuevo.';
+                }
+
+                // Sin CURP legible y aún quedan archivos: se reintenta al final,
+                // cuando los otros documentos ya hayan registrado a la persona
+                // (así no importa en qué orden se suban los archivos).
+                if (data.status === 'revision' && data.reintentable && !esReintento && cola.length) {
+                    celdas[1].innerHTML = '<span class="text-muted small"><i class="bi bi-arrow-repeat"></i> Al final</span>';
+                    celdas[4].innerHTML = '<span class="text-muted small">No se leyó la CURP. Se volverá a intentar cuando se procesen los demás archivos, para reconocer a la persona por su nombre.</span>';
+                    cola.push([archivo, fila, true]);
+                    continue;
                 }
 
                 totales.total++;

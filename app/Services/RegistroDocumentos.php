@@ -59,22 +59,36 @@ class RegistroDocumentos
             return $revision + ['mensaje' => 'No se pudo identificar el tipo de documento.'];
         }
 
-        if (empty($ocr['curp'])) {
-            $parecida = $this->personaPorNombre($ocr['nombre_completo'] ?? null);
-
-            // array_merge (y no "+") para que la sugerencia SÍ reemplace
-            // la CURP/nombre vacíos que traía $revision.
-            return array_merge($revision, [
-                'mensaje' => 'No se pudo leer una CURP válida en el documento.'
-                    .($parecida ? " Posiblemente es de {$parecida->nombre_completo}." : ''),
-                'sugerencia_persona_id' => $parecida?->id,
-                'curp' => $parecida?->curp,
-                'nombre_completo' => $parecida?->nombre_completo ?? $revision['nombre_completo'],
-            ]);
-        }
-
         $notas = [];
-        $persona = $this->personaPorCurp($ocr['curp']);
+
+        if (empty($ocr['curp'])) {
+            // Sin CURP legible (p. ej. una licencia con la foto borrosa): se
+            // busca en el texto el nombre de cada persona registrada,
+            // validándolo contra SU CURP. Solo se asigna si cuadra una sola.
+            $persona = $this->personaIdentificadaPorNombre($ocr);
+
+            if (! $persona) {
+                $parecida = $this->personaPorNombre($ocr['nombre_completo'] ?? null);
+
+                // array_merge (y no "+") para que la sugerencia SÍ reemplace
+                // la CURP/nombre vacíos que traía $revision.
+                return array_merge($revision, [
+                    'mensaje' => 'No se pudo leer una CURP válida en el documento ni reconocer el nombre de alguna persona registrada.'
+                        .($parecida ? " Posiblemente es de {$parecida->nombre_completo}." : ''),
+                    // En la carga masiva se reintenta al final de la tanda: para
+                    // entonces otro documento (CURP, INE, acta) ya pudo registrar
+                    // a la persona y su nombre ya se podrá reconocer.
+                    'reintentable' => true,
+                    'sugerencia_persona_id' => $parecida?->id,
+                    'curp' => $parecida?->curp,
+                    'nombre_completo' => $parecida?->nombre_completo ?? $revision['nombre_completo'],
+                ]);
+            }
+
+            $notas[] = 'La CURP no se leyó, pero el nombre del documento coincide con la CURP registrada de esta persona.';
+        } else {
+            $persona = $this->personaPorCurp($ocr['curp']);
+        }
 
         if (! $persona && ! $ocr['curp_verificada']) {
             $persona = $this->personaConCurpParecida($ocr['curp'], $ocr['nombre_completo'] ?? null);
@@ -103,6 +117,13 @@ class RegistroDocumentos
 
         $esNueva = false;
         $curpPersona = $persona->curp ?? $ocr['curp'];
+
+        // Un nombre que no cuadra con la CURP suele ser otra cosa mal leída
+        // (en una INE borrosa salió el domicilio). No se guarda: la persona
+        // queda "Sin nombre" y otro documento (CURP, acta) lo completará.
+        if (! ($ocr['nombre_verificado'] ?? true)) {
+            $ocr['nombre_completo'] = null;
+        }
 
         try {
             $documento = DB::transaction(function () use (&$persona, &$notas, &$esNueva, $archivo, $ocr, $hash) {
@@ -183,6 +204,32 @@ class RegistroDocumentos
 
             throw $e;
         }
+    }
+
+    /**
+     * Persona registrada cuyo nombre aparece en el texto del documento y
+     * cuadra letra por letra con su CURP (ver NombreEnCurp). Si el documento
+     * trae fecha de nacimiento, también debe coincidir. Solo devuelve una
+     * persona si es la ÚNICA que cuadra.
+     */
+    private function personaIdentificadaPorNombre(array $ocr): ?Persona
+    {
+        $texto = $ocr['texto_completo'] ?? $ocr['texto'] ?? '';
+
+        if (trim($texto) === '') {
+            return null;
+        }
+
+        $candidatas = Persona::whereNotNull('curp')->get()->filter(function (Persona $persona) use ($texto, $ocr) {
+            if (NombreEnCurp::enTexto($texto, $persona->curp) === null) {
+                return false;
+            }
+
+            return empty($ocr['fecha_nacimiento']) || $persona->fecha_nacimiento === null
+                || $persona->fecha_nacimiento->toDateString() === $ocr['fecha_nacimiento'];
+        });
+
+        return $candidatas->count() === 1 ? $candidatas->first() : null;
     }
 
     protected function personaPorCurp(string $curp): ?Persona

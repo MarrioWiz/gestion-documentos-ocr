@@ -96,11 +96,11 @@ class DocumentoController extends Controller
         set_time_limit(180);
         $archivo = $request->file('archivo');
 
-        try {
-            $resultado = $this->ocr->extraer($archivo->getRealPath());
-        } catch (\Throwable $e) {
-            report($e);
+        // Con caché: si el archivo se reintenta al final de la tanda, no se
+        // vuelve a pasar por el OCR.
+        $resultado = $this->leerArchivo($archivo);
 
+        if ($resultado === null) {
             return response()->json([
                 'status' => 'revision',
                 'archivo' => $archivo->getClientOriginalName(),

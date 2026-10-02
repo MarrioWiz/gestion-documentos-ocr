@@ -4,6 +4,7 @@ namespace Tests\Unit;
 
 use App\Services\ClasificadorDocumentos;
 use App\Services\DocumentoOcrService;
+use App\Services\NombreEnCurp;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -146,6 +147,28 @@ class AnalisisTextoTest extends TestCase
         $this->assertSame('acta_nacimiento', $r['tipo_documento']);
         // No confunde a la persona con sus padres (mismos apellidos).
         $this->assertSame('LOPEZ GARCIA MARIA FERNANDA', $r['nombre_completo']);
+    }
+
+    /**
+     * Foto borrosa real: el OCR mete basura corta ("c", "-", comillas)
+     * entre los renglones del nombre.
+     */
+    public function test_reconoce_el_nombre_aunque_el_ocr_meta_basura_entre_renglones(): void
+    {
+        $texto = "LICENCIA PARA CONDUCIR\nTIPO\nCARLOS DANIEL E c\n- MENDOZA RUIZ '\nk BMOSO8024VZMBRA! L. Or";
+
+        $this->assertSame('MENDOZA RUIZ CARLOS DANIEL', NombreEnCurp::enTexto($texto, 'MERC010722HPLNZRA3'));
+        // El nombre de otra persona no cuadra con esa CURP.
+        $this->assertNull(NombreEnCurp::enTexto($texto, 'LOGF951103MJCPRR08'));
+    }
+
+    public function test_un_nombre_que_no_cuadra_con_la_curp_no_se_marca_como_verificado(): void
+    {
+        // INE borrosa: la etiqueta "NOMBRE" va seguida del domicilio.
+        $r = $this->servicio->analizarTexto("CREDENCIAL PARA VOTAR\nNOMBRE\nMARGARITA MAZA\nCURP MERC010722HPLNZRA3");
+
+        $this->assertSame('MERC010722HPLNZRA3', $r['curp']);
+        $this->assertFalse($r['nombre_verificado']);
     }
 
     public function test_texto_sin_firmas_conocidas_no_se_clasifica(): void

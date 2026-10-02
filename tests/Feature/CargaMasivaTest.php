@@ -198,6 +198,50 @@ class CargaMasivaTest extends TestCase
         $this->assertSame([], Storage::disk('local')->allFiles("documentos/{$persona->id}"));
     }
 
+    /**
+     * Caso real: licencia con foto borrosa (sin CURP legible) subida junto
+     * con los demás documentos de la persona.
+     */
+    public function test_documento_sin_curp_se_asigna_por_el_nombre_que_cuadra_con_la_curp(): void
+    {
+        $persona = Persona::create(['curp' => self::CURP_CARLOS, 'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL', 'fecha_nacimiento' => '2001-07-22']);
+        Persona::create(['curp' => 'LOGF951103MJCPRR08', 'nombre_completo' => 'LOPEZ GARCIA MARIA FERNANDA']);
+
+        $this->subir('licencia.jpg', $this->lectura('licencia_conducir', [
+            'curp' => null,
+            'curp_verificada' => false,
+            'nombre_completo' => 'BASURA',
+            'nombre_verificado' => false,
+            'fecha_nacimiento' => null,
+            'texto_completo' => "LICENCIA PARA CONDUCIR\nCARLOS DANIEL e c\n- MENDOZA RUIZ '",
+        ]))->assertJson(['status' => 'guardado', 'persona_id' => $persona->id, 'persona_nueva' => false]);
+
+        $this->assertSame(['licencia_conducir'], $persona->documentos()->pluck('tipo_documento')->all());
+        $this->assertSame('MENDOZA RUIZ CARLOS DANIEL', $persona->fresh()->nombre_completo);
+    }
+
+    public function test_documento_sin_curp_ni_nombre_reconocible_se_marca_para_reintentar(): void
+    {
+        $this->subir('licencia.jpg', $this->lectura('licencia_conducir', [
+            'curp' => null,
+            'curp_verificada' => false,
+            'texto_completo' => 'LICENCIA PARA CONDUCIR texto ilegible',
+        ]))->assertJson(['status' => 'revision', 'reintentable' => true]);
+
+        $this->assertSame(0, Documento::count());
+    }
+
+    public function test_no_guarda_como_nombre_algo_que_no_cuadra_con_la_curp(): void
+    {
+        $this->subir('ine.png', $this->lectura('ine', ['nombre_completo' => 'MARGARITA MAZA', 'nombre_verificado' => false]))
+            ->assertJson(['status' => 'guardado', 'persona_nueva' => true]);
+        $this->assertSame(Persona::NOMBRE_PENDIENTE, Persona::first()->nombre_completo);
+
+        // Llega el acta con el nombre verificado y lo completa.
+        $this->subir('acta.jpg', $this->lectura('acta_nacimiento', ['nombre_verificado' => true]))->assertJson(['status' => 'guardado']);
+        $this->assertSame('MENDOZA RUIZ CARLOS DANIEL', Persona::first()->nombre_completo);
+    }
+
     public function test_varias_personas_en_una_sola_carga(): void
     {
         $this->subir('ine.png', $this->lectura('ine'))->assertJson(['status' => 'guardado']);

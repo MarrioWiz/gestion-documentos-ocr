@@ -92,7 +92,11 @@ Archivo (JPG, PNG, WEBP o PDF)
    • CURP nueva con dígito verificador correcto ───────► se registra a la persona
    • CURP que no pasa el verificador ──────────────────► se asocia solo si difiere en 1 carácter
                                                          de una persona existente; si no, va a revisión
-   • Sin CURP o sin tipo reconocido ───────────────────► revisión manual (con sugerencia por nombre)
+   • Sin CURP legible (p. ej. licencia borrosa) ───────► se busca el nombre de cada persona registrada y se
+                                                         valida contra SU CURP; si cuadra una sola, se le asigna.
+                                                         En carga masiva se reintenta al final de la tanda,
+                                                         así no importa el orden en que se suban los archivos
+   • Sin tipo reconocido o sin forma de identificar ───► revisión manual (con sugerencia por nombre)
 ```
 
 ## Requisitos
