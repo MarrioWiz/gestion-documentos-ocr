@@ -162,6 +162,34 @@ class AnalisisTextoTest extends TestCase
         $this->assertNull(NombreEnCurp::enTexto($texto, 'LOGF951103MJCPRR08'));
     }
 
+    /**
+     * El OCR leyó mal solo el dígito verificador (9 → 5). El nombre impreso
+     * cuadra 7/7 y la fecha impresa coincide: se recalcula el dígito.
+     */
+    public function test_recalcula_el_digito_verificador_si_nombre_y_fecha_lo_respaldan(): void
+    {
+        $texto = "INSTITUTO NACIONAL ELECTORAL\nNOMBRE\nSALAZAR\nMORA\nDIEGO\nCURP SAMD000101HSRLRGA5\nFECHA DE NACIMIENTO 01/01/2000";
+
+        $r = $this->servicio->analizarTexto($texto);
+
+        $this->assertSame('SAMD000101HSRLRGA9', $r['curp']);
+        $this->assertTrue($r['curp_verificada']);
+    }
+
+    public function test_no_recalcula_el_digito_si_la_fecha_impresa_no_coincide(): void
+    {
+        $texto = "INSTITUTO NACIONAL ELECTORAL\nNOMBRE\nSALAZAR\nMORA\nDIEGO\nCURP SAMD000101HSRLRGA5\nFECHA DE NACIMIENTO 05/03/2000";
+
+        $this->assertFalse($this->servicio->analizarTexto($texto)['curp_verificada']);
+    }
+
+    public function test_prefiere_el_nombre_en_menos_renglones_para_no_colar_el_domicilio(): void
+    {
+        $texto = "NOMBRE\nNUÑEZ\nBRENDA\nTCOMAL GAL 5 DE MAYO";
+
+        $this->assertSame('NUÑEZ BRENDA', NombreEnCurp::enTexto($texto, 'NUXB991231MDFXXR07'));
+    }
+
     public function test_etiquetas_intercaladas_y_apellido_compuesto(): void
     {
         $texto = 'Nombre(s): JOSE MANUEL Primer apellido: HERNANDEZ Segundo apellido: DE LA CRUZ';

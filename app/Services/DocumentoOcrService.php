@@ -491,9 +491,42 @@ class DocumentoOcrService
      *
      * @param  string[]  $variantes
      */
+    /**
+     * A veces el OCR lee bien toda la CURP excepto el ÚLTIMO carácter (el
+     * dígito verificador: un 9 leído como 5). Si los otros 17 están
+     * respaldados por el propio documento —el nombre impreso cuadra 7 de 7
+     * con ellos y la fecha de nacimiento impresa es la misma de la CURP—, el
+     * dígito verificador se recalcula con el algoritmo oficial.
+     *
+     * @param  array{curp: ?string, verificada: bool}  $curp
+     * @param  string[]  $variantes
+     * @return array{curp: ?string, verificada: bool}
+     */
+    private function reconstruirDigitoVerificador(array $curp, array $variantes): array
+    {
+        if ($curp['curp'] === null || $curp['verificada']) {
+            return $curp;
+        }
+
+        $primeros17 = substr($curp['curp'], 0, 17);
+        $reconstruida = $primeros17.Curp::digitoVerificador($primeros17);
+        $texto = implode("\n", $variantes);
+        $fecha = Curp::fechaNacimiento($reconstruida);
+
+        if (! Curp::esValida($reconstruida) || $fecha === null || NombreEnCurp::puntajeEnTexto($texto, $reconstruida) < 7) {
+            return $curp;
+        }
+
+        // La fecha de la CURP debe aparecer impresa (dd/mm/aaaa) en el documento.
+        [$anio, $mes, $dia] = explode('-', $fecha);
+        $fechaImpresa = preg_match('#\b'.$dia.'\s*[/\-. ]\s*'.$mes.'\s*[/\-. ]\s*'.$anio.'\b#', $texto);
+
+        return $fechaImpresa ? ['curp' => $reconstruida, 'verificada' => true] : $curp;
+    }
+
     private function combinar(array $variantes): array
     {
-        $curp = $this->elegirCurp($variantes);
+        $curp = $this->reconstruirDigitoVerificador($this->elegirCurp($variantes), $variantes);
         $clasificacion = $this->clasificador->clasificar(implode("\n", $variantes));
         $tipo = $clasificacion['tipo'];
 
@@ -521,6 +554,9 @@ class DocumentoOcrService
         foreach ($variantes as $texto) {
             $fecha ??= $this->extraerFechaPorEtiqueta($texto);
         }
+        // Fecha "confiable": de una CURP verificada o impresa en el documento.
+        // La de una CURP que no pasa el verificador puede ser basura del OCR.
+        $fechaConfiable = $fecha !== null;
         if ($fecha === null && $curp['curp'] !== null) {
             $fecha = Curp::fechaNacimiento($curp['curp']);
         }
@@ -539,6 +575,7 @@ class DocumentoOcrService
             'nombre_verificado' => ($nombre['prioridad'] ?? 0) >= 3,
             'numero_documento' => $numero['valor'] ?? null,
             'fecha_nacimiento' => $fecha,
+            'fecha_confiable' => $fechaConfiable,
             'entidad_nacimiento' => $curp['curp'] !== null ? Curp::entidad($curp['curp']) : null,
             'tipo_documento' => $tipo,
             'puntaje_tipo' => $clasificacion['puntaje'],

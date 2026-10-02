@@ -93,13 +93,19 @@ class RegistroDocumentos
         if (! $persona && ! $ocr['curp_verificada']) {
             $persona = $this->personaConCurpParecida($ocr['curp'], $ocr['nombre_completo'] ?? null);
 
-            if (! $persona) {
+            if ($persona) {
+                $notas[] = "La CURP se leyó como {$ocr['curp']} (un carácter distinto); se asoció a {$persona->curp}.";
+            } elseif ($persona = $this->personaIdentificadaPorNombre($ocr)) {
+                // Una CURP que no pasa el verificador y no se parece a ninguna
+                // es basura del OCR (foto borrosa): vale lo mismo que no tener
+                // CURP, así que se identifica a la persona por su nombre.
+                $notas[] = "La CURP se leyó mal ({$ocr['curp']}), pero el nombre del documento coincide con la CURP registrada de esta persona.";
+            } else {
                 return $revision + [
                     'mensaje' => "La CURP leída ({$ocr['curp']}) no pasa el dígito verificador; puede tener un error de lectura. Revísala antes de crear a la persona.",
+                    'reintentable' => true,
                 ];
             }
-
-            $notas[] = "La CURP se leyó como {$ocr['curp']} (un carácter distinto); se asoció a {$persona->curp}.";
         }
 
         $yaLoTenia = fn (Persona $p) => $base + [
@@ -123,6 +129,14 @@ class RegistroDocumentos
         // queda "Sin nombre" y otro documento (CURP, acta) lo completará.
         if (! ($ocr['nombre_verificado'] ?? true)) {
             $ocr['nombre_completo'] = null;
+        }
+
+        // Fecha y entidad salidas de una CURP mal leída no completan el expediente.
+        if (! ($ocr['fecha_confiable'] ?? true)) {
+            $ocr['fecha_nacimiento'] = null;
+        }
+        if (! ($ocr['curp_verificada'] ?? true)) {
+            $ocr['entidad_nacimiento'] = null;
         }
 
         try {
@@ -220,16 +234,26 @@ class RegistroDocumentos
             return null;
         }
 
-        $candidatas = Persona::whereNotNull('curp')->get()->filter(function (Persona $persona) use ($texto, $ocr) {
-            if (NombreEnCurp::enTexto($texto, $persona->curp) === null) {
-                return false;
-            }
+        // Solo se descarta por fecha si es confiable (impresa o de CURP
+        // verificada): la de una CURP mal leída descartaba a la persona correcta.
+        $fecha = ($ocr['fecha_confiable'] ?? true) ? ($ocr['fecha_nacimiento'] ?? null) : null;
 
-            return empty($ocr['fecha_nacimiento']) || $persona->fecha_nacimiento === null
-                || $persona->fecha_nacimiento->toDateString() === $ocr['fecha_nacimiento'];
-        });
+        $candidatas = Persona::whereNotNull('curp')->get()
+            ->filter(fn (Persona $persona) => empty($fecha) || $persona->fecha_nacimiento === null
+                || $persona->fecha_nacimiento->toDateString() === $fecha)
+            ->map(fn (Persona $persona) => ['persona' => $persona, 'puntaje' => NombreEnCurp::puntajeEnTexto($texto, $persona->curp)])
+            ->filter(fn (array $c) => $c['puntaje'] >= Curp::COINCIDENCIAS_MINIMAS_NOMBRE)
+            ->sortByDesc('puntaje')
+            ->values();
 
-        return $candidatas->count() === 1 ? $candidatas->first() : null;
+        // Gana la que MEJOR cuadra, y solo si nadie más empata con ella: con
+        // gemelos (mismos apellidos y fecha) el nombre de uno cuadra 6 de 7
+        // con la CURP del otro, pero 7 de 7 solo con la suya.
+        if ($candidatas->isEmpty() || ($candidatas->count() > 1 && $candidatas[0]['puntaje'] === $candidatas[1]['puntaje'])) {
+            return null;
+        }
+
+        return $candidatas[0]['persona'];
     }
 
     protected function personaPorCurp(string $curp): ?Persona

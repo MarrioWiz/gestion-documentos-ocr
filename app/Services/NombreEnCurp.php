@@ -29,6 +29,17 @@ class NombreEnCurp
      */
     public static function buscar(array $lineas, string $curp): ?string
     {
+        return self::buscarConPuntaje($lineas, $curp)['valor'] ?? null;
+    }
+
+    /**
+     * Igual que buscar(), pero dice además cuántas de las 7 letras cuadran.
+     *
+     * @param  string[]  $lineas
+     * @return array{valor: string, puntaje: int}|null
+     */
+    public static function buscarConPuntaje(array $lineas, string $curp): ?array
+    {
         // La zona de lectura mecánica del pasaporte ("P<MEXORTIZ<PEXA<<...")
         // escribe la Ñ como X y sin acentos: solo se usa si el nombre no
         // aparece en la parte visual del documento.
@@ -38,9 +49,15 @@ class NombreEnCurp
     }
 
     /**
+     * Entre los candidatos gana el que más letras cuadra; a igualdad, el que
+     * ocupa MENOS renglones (si no, en una INE se colaban palabras del
+     * domicilio como si fueran un segundo nombre) y luego el más largo (para
+     * no perder un segundo nombre escrito en el mismo renglón).
+     *
      * @param  string[]  $lineas
+     * @return array{valor: string, puntaje: int}|null
      */
-    private static function buscarEn(array $lineas, string $curp): ?string
+    private static function buscarEn(array $lineas, string $curp): ?array
     {
         $lineas = array_values(array_filter(array_map('trim', $lineas), fn (string $l) => $l !== ''));
         $ruido = array_map([Curp::class, 'sinAcentos'], DocumentoOcrService::RUIDO_NOMBRE);
@@ -53,19 +70,30 @@ class NombreEnCurp
                 foreach (self::segmentos($bloque, $ruido) as $unidades) {
                     $candidato = self::mejorAcomodo($unidades, $curp);
 
-                    if ($candidato !== null && ($mejor === null || [$candidato['puntaje'], $candidato['palabras']] > [$mejor['puntaje'], $mejor['palabras']])) {
+                    if ($candidato === null) {
+                        continue;
+                    }
+
+                    $candidato['orden'] = [$candidato['puntaje'], -$ventana, $candidato['palabras']];
+
+                    if ($mejor === null || $candidato['orden'] > $mejor['orden']) {
                         $mejor = $candidato;
                     }
                 }
             }
         }
 
-        return $mejor['valor'] ?? null;
+        return $mejor === null ? null : ['valor' => $mejor['valor'], 'puntaje' => $mejor['puntaje']];
     }
 
     public static function enTexto(string $texto, string $curp): ?string
     {
         return self::buscar(preg_split('/\r\n|\r|\n/', $texto), $curp);
+    }
+
+    public static function puntajeEnTexto(string $texto, string $curp): int
+    {
+        return self::buscarConPuntaje(preg_split('/\r\n|\r|\n/', $texto), $curp)['puntaje'] ?? 0;
     }
 
     /**

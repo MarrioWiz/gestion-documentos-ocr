@@ -69,6 +69,50 @@ class GenerarDocumentosEjemplo extends Command
             'padre' => 'FERNANDO ORTIZ CAN', 'madre' => 'LUCIA PEÑA DZUL', 'acta' => '04406',
             'pasaporte' => 'G77105432', 'licencia' => null, 'matricula' => null,
         ],
+
+        // Tercer juego (--set=estres): casos límite para probar el sistema.
+        'brenda' => [ // un solo apellido (X en la CURP), Ñ, nacida el último día de 1999
+            'paterno' => 'NUÑEZ', 'materno' => '', 'nombres' => 'BRENDA',
+            'curp17' => 'NUXB991231MDFXXR0', 'nacimiento' => '31/12/1999', 'sexo' => 'MUJER',
+            'entidad' => 'CIUDAD DE MEXICO', 'municipio' => 'IZTAPALAPA', 'clave_elector' => 'NXBRND99123109M100',
+            'padre' => '', 'madre' => 'CAROLINA NUÑEZ PAZ', 'acta' => '05120',
+            'pasaporte' => null, 'licencia' => null, 'matricula' => null,
+        ],
+        'diego' => [ // gemelo de Daniela: mismos apellidos y misma fecha
+            'paterno' => 'SALAZAR', 'materno' => 'MORA', 'nombres' => 'DIEGO',
+            'curp17' => 'SAMD000101HSRLRGA', 'nacimiento' => '01/01/2000', 'sexo' => 'HOMBRE',
+            'entidad' => 'SONORA', 'municipio' => 'HERMOSILLO', 'clave_elector' => 'SLMRDG00010126H300',
+            'padre' => 'HECTOR SALAZAR RUIZ', 'madre' => 'IRMA MORA LEYVA', 'acta' => '00031',
+            'pasaporte' => null, 'licencia' => null, 'matricula' => null,
+        ],
+        'daniela' => [
+            'paterno' => 'SALAZAR', 'materno' => 'MORA', 'nombres' => 'DANIELA',
+            'curp17' => 'SAMD000101MSRLRNA', 'nacimiento' => '01/01/2000', 'sexo' => 'MUJER',
+            'entidad' => 'SONORA', 'municipio' => 'HERMOSILLO', 'clave_elector' => 'SLMRDN00010126M800',
+            'padre' => 'HECTOR SALAZAR RUIZ', 'madre' => 'IRMA MORA LEYVA', 'acta' => '00032',
+            'pasaporte' => null, 'licencia' => 'SO4410982', 'matricula' => null,
+        ],
+        'guadalupe' => [ // "MA. GUADALUPE" en la INE, "MARIA GUADALUPE" en el acta
+            'paterno' => 'TORRES', 'materno' => 'LEON', 'nombres' => 'MARIA GUADALUPE',
+            'curp17' => 'TOLG750615MMNRND0', 'nacimiento' => '15/06/1975', 'sexo' => 'MUJER',
+            'entidad' => 'MICHOACAN', 'municipio' => 'MORELIA', 'clave_elector' => 'TRLNGD75061516M600',
+            'padre' => 'JESUS TORRES ARIAS', 'madre' => 'ESPERANZA LEON VACA', 'acta' => '01577',
+            'pasaporte' => null, 'licencia' => null, 'matricula' => null,
+        ],
+        'kevin' => [ // nacido en el extranjero (clave NE)
+            'paterno' => 'WILLIAMS', 'materno' => 'GARZA', 'nombres' => 'KEVIN',
+            'curp17' => 'WIGK040310HNELRVA', 'nacimiento' => '10/03/2004', 'sexo' => 'HOMBRE',
+            'entidad' => 'NACIDO EN EL EXTRANJERO', 'municipio' => 'HOUSTON', 'clave_elector' => null,
+            'padre' => 'JAMES WILLIAMS', 'madre' => 'LAURA GARZA OCHOA', 'acta' => '00745',
+            'pasaporte' => 'G30918264', 'licencia' => null, 'matricula' => null,
+        ],
+        'roberto' => [ // credencial vieja del IFE
+            'paterno' => 'CASTRO', 'materno' => 'VIDAL', 'nombres' => 'ROBERTO',
+            'curp17' => 'CAVR680820HJCSDB0', 'nacimiento' => '20/08/1968', 'sexo' => 'HOMBRE',
+            'entidad' => 'JALISCO', 'municipio' => 'ZAPOPAN', 'clave_elector' => 'CSVDRB68082014H200',
+            'padre' => 'ROBERTO CASTRO ORTEGA', 'madre' => 'AMELIA VIDAL ROJAS', 'acta' => '02904',
+            'pasaporte' => null, 'licencia' => null, 'matricula' => null,
+        ],
     ];
 
     private string $fuente;
@@ -93,6 +137,10 @@ class GenerarDocumentosEjemplo extends Command
 
         if ($this->option('set') === 'extra') {
             return $this->generarJuegoExtra($dir);
+        }
+
+        if ($this->option('set') === 'estres') {
+            return $this->generarJuegoEstres($dir);
         }
 
         $carlos = $this->persona('carlos');
@@ -167,6 +215,74 @@ class GenerarDocumentosEjemplo extends Command
         return self::SUCCESS;
     }
 
+    /**
+     * Casos límite y fotos de mala calidad. Además de los archivos escribe
+     * esperado.json con el tipo y la CURP que DEBE detectar el sistema en
+     * cada uno, para verificarlo automáticamente.
+     */
+    private function generarJuegoEstres(string $dir): int
+    {
+        $p = array_map(fn (string $clave) => $this->persona($clave), array_combine(
+            ['brenda', 'diego', 'daniela', 'guadalupe', 'kevin', 'roberto'],
+            ['brenda', 'diego', 'daniela', 'guadalupe', 'kevin', 'roberto'],
+        ));
+        $esperado = [];
+        $guardar = function (string $archivo, \GdImage $img, string $tipo, string $persona, int $calidad = 88) use ($dir, $p, &$esperado) {
+            match (pathinfo($archivo, PATHINFO_EXTENSION)) {
+                'png' => imagepng($img, "{$dir}/{$archivo}"),
+                'webp' => imagewebp($img, "{$dir}/{$archivo}", $calidad),
+                default => imagejpeg($img, "{$dir}/{$archivo}", $calidad),
+            };
+            $esperado[$archivo] = ['tipo' => $tipo, 'curp' => $p[$persona]['curp']];
+        };
+        $pdf = function (string $archivo, array $imagenes, string $tipo, string $persona) use ($dir, $p, &$esperado) {
+            $rutas = [];
+            foreach ($imagenes as $i => $img) {
+                imagepng($img, $rutas[] = "{$dir}/_pagina{$i}.png");
+            }
+            $this->convertirAPdf($rutas, "{$dir}/{$archivo}");
+            array_map('unlink', $rutas);
+            $esperado[$archivo] = ['tipo' => $tipo, 'curp' => $p[$persona]['curp']];
+        };
+
+        // Brenda: INE fotografiada muy chica y acta inclinada.
+        $guardar('brenda_ine_chica.jpg', $this->achicar($this->ine($p['brenda']), 520), 'ine', 'brenda');
+        $guardar('brenda_acta_inclinada.jpg', $this->inclinar($this->acta($p['brenda']), 4), 'acta_nacimiento', 'brenda');
+
+        // Gemelos: la licencia borrosa de Daniela NO debe irse a Diego.
+        $guardar('diego_ine.jpg', $this->ine($p['diego']), 'ine', 'diego');
+        $pdf('diego_acta_escaneada.pdf', [$this->acta($p['diego'])], 'acta_nacimiento', 'diego');
+        $guardar('daniela_ine_oscura.jpg', $this->oscurecer($this->ine($p['daniela'])), 'ine', 'daniela');
+        $this->pdfConTexto($this->lineasConstanciaCurp($p['daniela']), "{$dir}/daniela_curp.pdf");
+        $esperado['daniela_curp.pdf'] = ['tipo' => 'curp', 'curp' => $p['daniela']['curp']];
+        $guardar('daniela_licencia_borrosa.jpg', $this->desenfocar($this->licencia($p['daniela'])), 'licencia_conducir', 'daniela', 70);
+
+        // Guadalupe: "MA." en la INE, acta girada 90°, CURP muy comprimida.
+        $guardar('guadalupe_ine.png', $this->ine(array_merge($p['guadalupe'], ['nombres' => 'MA. GUADALUPE'])), 'ine', 'guadalupe');
+        $guardar('guadalupe_acta_girada.jpg', imagerotate($this->acta($p['guadalupe']), 270, 0), 'acta_nacimiento', 'guadalupe');
+        $guardar('guadalupe_curp_comprimida.jpg', $this->constanciaCurp($p['guadalupe']), 'curp', 'guadalupe', 18);
+
+        // Kevin: nacido en el extranjero.
+        $this->pdfConTexto($this->lineasConstanciaCurp($p['kevin']), "{$dir}/kevin_curp.pdf");
+        $esperado['kevin_curp.pdf'] = ['tipo' => 'curp', 'curp' => $p['kevin']['curp']];
+        $guardar('kevin_pasaporte.jpg', $this->pasaporte($p['kevin']), 'pasaporte', 'kevin');
+
+        // Roberto: credencial vieja del IFE y acta escaneada de 2 páginas.
+        $guardar('roberto_ife.jpg', $this->ine($p['roberto'], true), 'ine', 'roberto');
+        $pdf('roberto_acta_2_paginas.pdf', [$this->portadaCopiaCertificada(), $this->acta($p['roberto'])], 'acta_nacimiento', 'roberto');
+        $guardar('roberto_curp.png', $this->constanciaCurp($p['roberto']), 'curp', 'roberto');
+
+        file_put_contents("{$dir}/esperado.json", json_encode($esperado, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+
+        foreach (glob("{$dir}/*") as $archivo) {
+            $this->line('  '.basename($archivo));
+        }
+        $this->info("Documentos de ejemplo generados en {$dir}");
+        $this->line('CURP ficticias: '.implode(', ', array_column($p, 'curp')));
+
+        return self::SUCCESS;
+    }
+
     private function persona(string $clave): array
     {
         $p = self::PERSONAS[$clave];
@@ -177,7 +293,10 @@ class GenerarDocumentosEjemplo extends Command
 
     // ------------------------------------------------------------------ INE
 
-    private function ine(array $p): \GdImage
+    /**
+     * @param  bool  $ife  credencial anterior a 2014 (Instituto FEDERAL Electoral)
+     */
+    private function ine(array $p, bool $ife = false): \GdImage
     {
         $img = $this->lienzo(1012, 638, [246, 222, 233], [214, 236, 240]);
         $tinta = imagecolorallocate($img, 25, 25, 35);
@@ -191,8 +310,8 @@ class GenerarDocumentosEjemplo extends Command
         }
 
         $this->texto($img, 30, 50, 17, 'MÉXICO', $guinda, true);
-        $this->texto($img, 300, 42, 19, 'INSTITUTO NACIONAL ELECTORAL', $guinda, true);
-        $this->texto($img, 300, 72, 15, 'CREDENCIAL PARA VOTAR', $guinda, true);
+        $this->texto($img, 300, 42, 19, $ife ? 'INSTITUTO FEDERAL ELECTORAL' : 'INSTITUTO NACIONAL ELECTORAL', $guinda, true);
+        $this->texto($img, 300, 72, 15, $ife ? 'CREDENCIAL PARA VOTAR CON FOTOGRAFIA' : 'CREDENCIAL PARA VOTAR', $guinda, true);
 
         // Recuadro de la foto.
         imagefilledrectangle($img, 32, 120, 262, 420, imagecolorallocate($img, 200, 200, 210));
@@ -429,6 +548,44 @@ class GenerarDocumentosEjemplo extends Command
         return $borrosa;
     }
 
+    // ------------------------------------------------- Fotos de mala calidad
+
+    private function achicar(\GdImage $img, int $ancho): \GdImage
+    {
+        $chica = imagescale($img, $ancho, (int) round(imagesy($img) * $ancho / imagesx($img)), IMG_BILINEAR_FIXED);
+        imagedestroy($img);
+
+        return $chica;
+    }
+
+    private function inclinar(\GdImage $img, float $grados): \GdImage
+    {
+        $inclinada = imagerotate($img, $grados, imagecolorallocate($img, 245, 245, 240));
+        imagedestroy($img);
+
+        return $inclinada;
+    }
+
+    private function oscurecer(\GdImage $img): \GdImage
+    {
+        imagefilter($img, IMG_FILTER_BRIGHTNESS, -70);
+        imagefilter($img, IMG_FILTER_CONTRAST, 25);
+
+        return $img;
+    }
+
+    private function portadaCopiaCertificada(): \GdImage
+    {
+        $img = $this->lienzo(1275, 1650, [252, 252, 250], [240, 244, 238]);
+        $tinta = imagecolorallocate($img, 30, 30, 30);
+        $this->texto($img, 330, 600, 28, 'COPIA CERTIFICADA', $tinta, true);
+        $this->texto($img, 200, 680, 18, 'Documento expedido por medios electrónicos.', $tinta);
+        $this->texto($img, 200, 720, 18, 'Consta de 2 páginas. Página 1 de 2.', $tinta);
+        $this->leyendaFicticia($img);
+
+        return $img;
+    }
+
     // ------------------------------------------------------------ Soporte
 
     /**
@@ -518,7 +675,10 @@ class GenerarDocumentosEjemplo extends Command
     /**
      * PDF "escaneado" (solo imagen, sin texto): se arma con mutool.
      */
-    private function convertirAPdf(string $imagen, string $pdf): void
+    /**
+     * @param  string|string[]  $imagenes  una imagen por página
+     */
+    private function convertirAPdf(string|array $imagenes, string $pdf): void
     {
         $mutool = config('services.mutool.executable');
 
@@ -528,6 +688,6 @@ class GenerarDocumentosEjemplo extends Command
             return;
         }
 
-        Process::run([$mutool, 'convert', '-O', 'compress-images', '-o', $pdf, $imagen]);
+        Process::run([$mutool, 'convert', '-O', 'compress-images', '-o', $pdf, ...(array) $imagenes]);
     }
 }

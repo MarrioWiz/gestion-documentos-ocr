@@ -242,6 +242,46 @@ class CargaMasivaTest extends TestCase
         $this->assertSame('MENDOZA RUIZ CARLOS DANIEL', Persona::first()->nombre_completo);
     }
 
+    /**
+     * Gemelos: mismos apellidos y fecha. El nombre de Daniela cuadra 7/7 con
+     * su CURP y 6/7 con la de Diego: el documento debe ir con Daniela.
+     */
+    public function test_documento_sin_curp_de_un_gemelo_va_con_quien_mejor_cuadra(): void
+    {
+        Persona::create(['curp' => 'SAMD000101HSRLRGA9', 'nombre_completo' => 'SALAZAR MORA DIEGO', 'fecha_nacimiento' => '2000-01-01']);
+        $daniela = Persona::create(['curp' => 'SAMD000101MSRLRNA8', 'nombre_completo' => 'SALAZAR MORA DANIELA', 'fecha_nacimiento' => '2000-01-01']);
+
+        $this->subir('licencia.jpg', $this->lectura('licencia_conducir', [
+            'curp' => null,
+            'curp_verificada' => false,
+            'fecha_nacimiento' => null,
+            'texto_completo' => "LICENCIA PARA CONDUCIR\nDANIELA\nSALAZAR MORA",
+        ]))->assertJson(['status' => 'guardado', 'persona_id' => $daniela->id]);
+    }
+
+    /**
+     * Foto borrosa: el OCR "inventó" una CURP que no pasa el verificador y no
+     * se parece a nadie, y su fecha (1 de mayo) no es la real. Se ignora esa
+     * CURP y se identifica a la persona por su nombre, sin cambiarle datos.
+     */
+    public function test_curp_rota_se_ignora_y_se_identifica_por_nombre(): void
+    {
+        $persona = Persona::create(['curp' => self::CURP_CARLOS, 'nombre_completo' => 'MENDOZA RUIZ CARLOS DANIEL', 'fecha_nacimiento' => '2001-07-22', 'entidad_nacimiento' => 'Puebla']);
+
+        $this->subir('licencia.jpg', $this->lectura('licencia_conducir', [
+            'curp' => 'MXRA000501HSRLRNA5',
+            'curp_verificada' => false,
+            'fecha_nacimiento' => '2000-05-01',
+            'fecha_confiable' => false,
+            'entidad_nacimiento' => 'Sonora',
+            'texto_completo' => "LICENCIA\nCARLOS DANIEL\nMENDOZA RUIZ",
+        ]))->assertJson(['status' => 'guardado', 'persona_id' => $persona->id]);
+
+        $persona->refresh();
+        $this->assertSame('2001-07-22', $persona->fecha_nacimiento->toDateString());
+        $this->assertSame('Puebla', $persona->entidad_nacimiento);
+    }
+
     public function test_varias_personas_en_una_sola_carga(): void
     {
         $this->subir('ine.png', $this->lectura('ine'))->assertJson(['status' => 'guardado']);

@@ -164,6 +164,12 @@ Para regenerarlos: `php artisan documentos:generar-ejemplos`
 php artisan documentos:generar-ejemplos --set=extra --dir="C:/ruta/de/salida"
 ```
 
+**Tercer juego (casos difíciles):** gemelos, un solo apellido, "MA. GUADALUPE", nacido en el extranjero, credencial del IFE, acta de 2 páginas y fotos chicas, oscuras, inclinadas, comprimidas o borrosas. Incluye `esperado.json` con el tipo y la CURP correctos de cada archivo.
+
+```bash
+php artisan documentos:generar-ejemplos --set=estres --dir="C:/ruta/de/salida"
+```
+
 ## Pruebas automáticas
 
 ```bash
